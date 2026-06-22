@@ -1,4 +1,4 @@
-//! BitMesh: Fast Graph Theory on Chess Bitboards
+//! `BitMesh`: Fast Graph Theory on Chess Bitboards
 //! 
 //! This library provides algorithms like Union-Find to decompose
 //! a chess position into independent combinatorial game components.
@@ -20,6 +20,7 @@ impl Default for UnionFind {
 
 impl UnionFind {
     /// Creates a new Union-Find structure where each square is its own connected component.
+    #[must_use] 
     pub fn new() -> Self {
         let mut parent = [0; 64];
         for (i, p) in parent.iter_mut().enumerate() {
@@ -32,6 +33,7 @@ impl UnionFind {
     }
 
     /// Creates a new Union-Find structure that only initializes squares present in the given mask.
+    #[must_use] 
     pub fn with_mask(mask: Bitboard) -> Self {
         let mut parent = [0; 64];
         for sq in mask {
@@ -97,6 +99,7 @@ impl UnionFind {
 ///
 /// Uses bulletproof bitwise logic to compute 8-way adjacency between non-barrier squares,
 /// returning a `UnionFind` structure representing the connected components.
+#[must_use] 
 pub fn partition_board(barrier: Bitboard) -> UnionFind {
     let free = !barrier;
     let mut uf = UnionFind::with_mask(free);
