@@ -31,6 +31,19 @@ impl UnionFind {
         }
     }
 
+    /// Creates a new Union-Find structure that only initializes squares present in the given mask.
+    pub fn with_mask(mask: Bitboard) -> Self {
+        let mut parent = [0; 64];
+        for sq in mask {
+            let i = usize::from(sq);
+            parent[i] = i as u8;
+        }
+        UnionFind {
+            parent,
+            rank: [0; 64],
+        }
+    }
+
     /// Finds the representative of the set containing square `i`, using path compression.
     pub fn find(&mut self, i: usize) -> usize {
         let mut root = i;
@@ -85,8 +98,9 @@ impl UnionFind {
 /// Uses bulletproof bitwise logic to compute 8-way adjacency between non-barrier squares,
 /// returning a `UnionFind` structure representing the connected components.
 pub fn partition_board(barrier: Bitboard) -> UnionFind {
-    let mut uf = UnionFind::new();
-    let f: u64 = (!barrier).into();
+    let free = !barrier;
+    let mut uf = UnionFind::with_mask(free);
+    let f: u64 = free.into();
 
     let not_h: u64 = !0x8080808080808080;
     let not_a: u64 = !0x0101010101010101;
@@ -174,8 +188,8 @@ mod tests {
 
         let mut uf = partition_board(barrier);
 
-        // A1 should be disconnected from H1
-        assert!(!uf.connected(usize::from(Square::A1), usize::from(Square::H1)));
+        // A1 is connected to H1 via the bottom row, which is entirely empty
+        assert!(uf.connected(usize::from(Square::A1), usize::from(Square::H1)));
         
         // A1 (bottom-left) should be separated from A8 (top-left)
         assert!(!uf.connected(usize::from(Square::A1), usize::from(Square::A8)));
