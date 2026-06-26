@@ -1,15 +1,17 @@
 //! `BitMesh`: Fast Graph Theory on Chess Bitboards
-//! 
+//!
 //! This library provides algorithms like Union-Find to decompose
 //! a chess position into independent combinatorial game components.
 
-use shakmaty::Bitboard;
+use shakmaty::{Bitboard, Board, Color};
+use std::collections::HashSet;
 
 /// Standard Union-Find (Disjoint Set) over the 64 squares of a chessboard.
 #[derive(Clone, Debug)]
 pub struct UnionFind {
     parent: [u8; 64],
     rank: [u8; 64],
+    active: [bool; 64],
 }
 
 impl Default for UnionFind {
@@ -20,7 +22,7 @@ impl Default for UnionFind {
 
 impl UnionFind {
     /// Creates a new Union-Find structure where each square is its own connected component.
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         let mut parent = [0; 64];
         for (i, p) in parent.iter_mut().enumerate() {
@@ -29,25 +31,43 @@ impl UnionFind {
         UnionFind {
             parent,
             rank: [0; 64],
+            active: [true; 64],
         }
     }
 
     /// Creates a new Union-Find structure that only initializes squares present in the given mask.
-    #[must_use] 
+    #[must_use]
     pub fn with_mask(mask: Bitboard) -> Self {
         let mut parent = [0; 64];
+        let mut active = [false; 64];
+        for (i, p) in parent.iter_mut().enumerate() {
+            *p = i as u8;
+        }
         for sq in mask {
             let i = usize::from(sq);
             parent[i] = i as u8;
+            active[i] = true;
         }
         UnionFind {
             parent,
             rank: [0; 64],
+            active,
         }
+    }
+
+    /// Returns `true` when a square belongs to this union-find domain.
+    #[must_use]
+    pub fn contains(&self, i: usize) -> bool {
+        i < 64 && self.active[i]
     }
 
     /// Finds the representative of the set containing square `i`, using path compression.
     pub fn find(&mut self, i: usize) -> usize {
+        assert!(
+            self.contains(i),
+            "square index {i} is outside this union-find domain"
+        );
+
         let mut root = i;
         while self.parent[root] as usize != root {
             root = self.parent[root] as usize;
@@ -67,6 +87,15 @@ impl UnionFind {
     /// Unions the sets containing squares `i` and `j`, using union by rank.
     /// Returns `true` if they were in different sets and are now merged.
     pub fn union(&mut self, i: usize, j: usize) -> bool {
+        assert!(
+            self.contains(i),
+            "square index {i} is outside this union-find domain"
+        );
+        assert!(
+            self.contains(j),
+            "square index {j} is outside this union-find domain"
+        );
+
         let root_i = self.find(i);
         let root_j = self.find(j);
 
@@ -99,7 +128,7 @@ impl UnionFind {
 ///
 /// Uses bulletproof bitwise logic to compute 8-way adjacency between non-barrier squares,
 /// returning a `UnionFind` structure representing the connected components.
-#[must_use] 
+#[must_use]
 pub fn partition_board(barrier: Bitboard) -> UnionFind {
     let free = !barrier;
     let mut uf = UnionFind::with_mask(free);
@@ -110,10 +139,10 @@ pub fn partition_board(barrier: Bitboard) -> UnionFind {
 
     // Compute adjacency masks where a bit at index `i` indicates that square `i`
     // and its neighbor in the given direction are both free.
-    let east  = f & (f >> 1) & not_h;
+    let east = f & (f >> 1) & not_h;
     let north = f & (f >> 8);
-    let ne    = f & (f >> 9) & not_h;
-    let nw    = f & (f >> 7) & not_a;
+    let ne = f & (f >> 9) & not_h;
+    let nw = f & (f >> 7) & not_a;
 
     // Apply unions for each connected pair
     for sq in Bitboard::from(east) {
@@ -132,10 +161,53 @@ pub fn partition_board(barrier: Bitboard) -> UnionFind {
     uf
 }
 
+/// Identifies pawns that are blocked and have no immediate legal capture target.
+#[must_use]
+pub fn get_locked_pawns(board: &Board) -> Bitboard {
+    let occupied = board.occupied();
+    let mut locked = Bitboard::EMPTY;
+
+    for sq in board.pawns() {
+        let color = board
+            .color_at(sq)
+            .expect("squares from board.pawns() must contain a pawn");
+        let forward_offset = if color == Color::White { 8 } else { -8 };
+        let is_blocked = sq
+            .offset(forward_offset)
+            .is_none_or(|forward_sq| occupied.contains(forward_sq));
+
+        let attacks = shakmaty::attacks::pawn_attacks(color, sq);
+        let has_captures = (attacks & board.by_color(!color)).any();
+
+        if is_blocked && !has_captures {
+            locked ^= Bitboard::from_square(sq);
+        }
+    }
+
+    locked
+}
+
+/// Finds active topological subsystems separated by locked-pawn barriers.
+#[must_use]
+pub fn find_subsystems(board: &Board) -> (bool, u8) {
+    let barrier = get_locked_pawns(board);
+    let mobile_pieces = board.occupied() & !barrier;
+    let mut uf = partition_board(barrier);
+    let mut active_components = HashSet::new();
+
+    for sq in mobile_pieces {
+        active_components.insert(uf.find(usize::from(sq)));
+    }
+
+    let num_components = active_components.len().min(u8::MAX as usize) as u8;
+    (num_components > 1, num_components)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shakmaty::Square;
+    use shakmaty::{CastlingMode, Chess, Position, Square, fen::Fen};
+    use std::str::FromStr;
 
     #[test]
     fn test_empty_board() {
@@ -163,7 +235,7 @@ mod tests {
         // But a 1-thick diagonal line (A1, B2, C3...) does NOT block 8-way, because A2 connects to B1 across the diagonal!
         // So a diagonal barrier needs to be 2-thick to block 8-way.
         // A locked pawn chain is exactly 2-thick! White pawns on b2, c3, d4, e5... Black pawns on b3, c4, d5, e6...
-        
+
         let mut barrier = Bitboard::from(0);
         // White pawns
         barrier.add(Square::B2);
@@ -179,7 +251,7 @@ mod tests {
         barrier.add(Square::E6);
         barrier.add(Square::F7);
         barrier.add(Square::G8);
-        
+
         // Let's also block the edges so the chain reaches the walls.
         // To complete the wall from file A to H:
         // A2, A3
@@ -193,10 +265,10 @@ mod tests {
 
         // A1 is connected to H1 via the bottom row, which is entirely empty
         assert!(uf.connected(usize::from(Square::A1), usize::from(Square::H1)));
-        
+
         // A1 (bottom-left) should be separated from A8 (top-left)
         assert!(!uf.connected(usize::from(Square::A1), usize::from(Square::A8)));
-        
+
         // A8 and H1 should be on different sides?
         // Wait, the barrier is from A2/A3 to H7/H8.
         // It separates the bottom-right (H1) from the top-left (A8).
@@ -207,5 +279,26 @@ mod tests {
 
         // H1 and G1 should be connected
         assert!(uf.connected(usize::from(Square::H1), usize::from(Square::G1)));
+    }
+
+    #[test]
+    fn test_barrier_squares_are_outside_partition_domain() {
+        let barrier = Bitboard::from_square(Square::A4);
+        let uf = partition_board(barrier);
+
+        assert!(!uf.contains(usize::from(Square::A4)));
+        assert!(uf.contains(usize::from(Square::A3)));
+    }
+
+    #[test]
+    fn test_readme_subsystems_example() {
+        let fen =
+            Fen::from_str("rnbqkbnr/pp3ppp/4p3/2ppP3/3P4/8/PPP2PPP/RNBQKBNR w KQkq - 0 4").unwrap();
+        let pos: Chess = fen.into_position(CastlingMode::Standard).unwrap();
+
+        let (is_decomposable, num_components) = find_subsystems(pos.board());
+
+        assert!(!is_decomposable);
+        assert_eq!(num_components, 1);
     }
 }
