@@ -3,7 +3,7 @@
 //! This library provides algorithms like Union-Find to decompose
 //! a chess position into independent combinatorial game components.
 
-use shakmaty::{Bitboard, Board, Color};
+use shakmaty::{Bitboard, Board, Color, Square};
 use std::collections::{BTreeMap, HashSet};
 
 /// Standard Union-Find (Disjoint Set) over the 64 squares of a chessboard.
@@ -231,6 +231,192 @@ pub struct DecompositionCertificate {
     pub status: DecompositionStatus,
     /// Rejection reason for non-strict certificates.
     pub rejection_reason: Option<DecompositionRejectionReason>,
+}
+
+/// Structural validation error for a [`DecompositionCertificate`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecompositionCertificateValidationError {
+    /// The `strict` convenience flag disagrees with `status`.
+    StrictStatusMismatch {
+        /// Value stored in [`DecompositionCertificate::strict`].
+        strict: bool,
+        /// Value stored in [`DecompositionCertificate::status`].
+        status: DecompositionStatus,
+    },
+    /// A component contains at least one barrier square.
+    ComponentIntersectsBarrier {
+        /// Index of the invalid component.
+        component_index: usize,
+    },
+    /// A component's active mask contains a square outside the component mask.
+    ActiveMaskOutsideComponent {
+        /// Index of the invalid component.
+        component_index: usize,
+    },
+    /// The declared active component count does not match `components.len()`.
+    ActiveComponentCountMismatch {
+        /// Value stored in [`DecompositionCertificate::active_component_count`].
+        declared: u8,
+        /// Number of components actually present.
+        actual: usize,
+    },
+    /// A strict certificate does not contain at least two active components.
+    StrictWithTooFewActiveComponents {
+        /// Number of active components actually present.
+        active_component_count: usize,
+    },
+    /// A strict certificate carries a rejection reason.
+    StrictWithRejectionReason {
+        /// Rejection reason present on the strict certificate.
+        rejection_reason: DecompositionRejectionReason,
+    },
+    /// A rejected certificate does not carry a rejection reason.
+    RejectedWithoutRejectionReason,
+    /// Two component masks overlap.
+    ComponentMasksOverlap {
+        /// Index of the first overlapping component.
+        first_component_index: usize,
+        /// Index of the second overlapping component.
+        second_component_index: usize,
+    },
+    /// Two distinct certified components have adjacent non-barrier squares.
+    CrossComponentAdjacency {
+        /// Index of the first adjacent component.
+        first_component_index: usize,
+        /// Index of the second adjacent component.
+        second_component_index: usize,
+        /// Square in the first component.
+        first_square: Square,
+        /// Adjacent square in the second component.
+        second_square: Square,
+    },
+}
+
+impl DecompositionCertificate {
+    /// Validates bounded structural invariants for this certificate.
+    ///
+    /// This checks mask/status consistency and audits 8-way adjacency between
+    /// certified component masks. It does not prove full legal-chess dynamic
+    /// independence.
+    pub fn validate(&self) -> Result<(), DecompositionCertificateValidationError> {
+        let expected_strict = self.status == DecompositionStatus::Strict;
+        if self.strict != expected_strict {
+            return Err(
+                DecompositionCertificateValidationError::StrictStatusMismatch {
+                    strict: self.strict,
+                    status: self.status,
+                },
+            );
+        }
+
+        if usize::from(self.active_component_count) != self.components.len() {
+            return Err(
+                DecompositionCertificateValidationError::ActiveComponentCountMismatch {
+                    declared: self.active_component_count,
+                    actual: self.components.len(),
+                },
+            );
+        }
+
+        match self.status {
+            DecompositionStatus::Strict => {
+                if self.components.len() < 2 {
+                    return Err(
+                        DecompositionCertificateValidationError::StrictWithTooFewActiveComponents {
+                            active_component_count: self.components.len(),
+                        },
+                    );
+                }
+                if let Some(rejection_reason) = self.rejection_reason {
+                    return Err(
+                        DecompositionCertificateValidationError::StrictWithRejectionReason {
+                            rejection_reason,
+                        },
+                    );
+                }
+            }
+            DecompositionStatus::Rejected => {
+                if self.rejection_reason.is_none() {
+                    return Err(
+                        DecompositionCertificateValidationError::RejectedWithoutRejectionReason,
+                    );
+                }
+            }
+        }
+
+        let mut component_by_square = [None; 64];
+        for (component_index, component) in self.components.iter().enumerate() {
+            if !component.mask.is_disjoint(self.barrier) {
+                return Err(
+                    DecompositionCertificateValidationError::ComponentIntersectsBarrier {
+                        component_index,
+                    },
+                );
+            }
+
+            if !component.active_mask.is_subset(component.mask) {
+                return Err(
+                    DecompositionCertificateValidationError::ActiveMaskOutsideComponent {
+                        component_index,
+                    },
+                );
+            }
+
+            for sq in component.mask {
+                let square_index = usize::from(sq);
+                if let Some(first_component_index) = component_by_square[square_index] {
+                    return Err(
+                        DecompositionCertificateValidationError::ComponentMasksOverlap {
+                            first_component_index,
+                            second_component_index: component_index,
+                        },
+                    );
+                }
+                component_by_square[square_index] = Some(component_index);
+            }
+        }
+
+        for (component_index, component) in self.components.iter().enumerate() {
+            for sq in component.mask {
+                for (file_delta, rank_delta) in EIGHT_WAY_DELTAS {
+                    if let Some(adjacent) = adjacent_square(sq, file_delta, rank_delta) {
+                        let adjacent_index = usize::from(adjacent);
+                        if let Some(adjacent_component_index) = component_by_square[adjacent_index]
+                            && adjacent_component_index != component_index
+                        {
+                            return Err(
+                                DecompositionCertificateValidationError::CrossComponentAdjacency {
+                                    first_component_index: component_index,
+                                    second_component_index: adjacent_component_index,
+                                    first_square: sq,
+                                    second_square: adjacent,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+const EIGHT_WAY_DELTAS: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
+fn adjacent_square(sq: Square, file_delta: i32, rank_delta: i32) -> Option<Square> {
+    let file = sq.file().offset(file_delta)?;
+    let rank = sq.rank().offset(rank_delta)?;
+    Some(Square::from_coords(file, rank))
 }
 
 /// Builds a decomposition certificate using locked-pawn barriers and the board partition.
@@ -467,6 +653,102 @@ mod tests {
             assert!(component.active_mask.is_disjoint(certificate.barrier));
             assert!(component.active_mask.is_subset(component.mask));
         }
+    }
+
+    #[test]
+    fn test_certificate_validation_accepts_certifier_outputs() {
+        let strict_certificate = certify_decomposition(&locked_horizontal_chain_board());
+        let rejected_certificate = certify_decomposition(&Board::new());
+
+        assert_eq!(strict_certificate.validate(), Ok(()));
+        assert_eq!(rejected_certificate.validate(), Ok(()));
+    }
+
+    #[test]
+    fn test_certificate_validation_rejects_active_component_count_mismatch() {
+        let mut certificate = certify_decomposition(&locked_horizontal_chain_board());
+        certificate.active_component_count = 1;
+
+        assert_eq!(
+            certificate.validate(),
+            Err(
+                DecompositionCertificateValidationError::ActiveComponentCountMismatch {
+                    declared: 1,
+                    actual: 2,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_certificate_validation_rejects_overlapping_component_masks() {
+        let overlap = Bitboard::from_square(Square::A1);
+        let certificate = DecompositionCertificate {
+            barrier: Bitboard::EMPTY,
+            components: vec![
+                DecompositionComponent {
+                    root: usize::from(Square::A1) as u8,
+                    mask: overlap,
+                    active_mask: overlap,
+                },
+                DecompositionComponent {
+                    root: usize::from(Square::A1) as u8,
+                    mask: overlap,
+                    active_mask: overlap,
+                },
+            ],
+            active_component_count: 2,
+            strict: true,
+            status: DecompositionStatus::Strict,
+            rejection_reason: None,
+        };
+
+        assert_eq!(
+            certificate.validate(),
+            Err(
+                DecompositionCertificateValidationError::ComponentMasksOverlap {
+                    first_component_index: 0,
+                    second_component_index: 1,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_certificate_validation_rejects_cross_component_adjacency() {
+        let a1 = Bitboard::from_square(Square::A1);
+        let b1 = Bitboard::from_square(Square::B1);
+        let certificate = DecompositionCertificate {
+            barrier: Bitboard::EMPTY,
+            components: vec![
+                DecompositionComponent {
+                    root: usize::from(Square::A1) as u8,
+                    mask: a1,
+                    active_mask: a1,
+                },
+                DecompositionComponent {
+                    root: usize::from(Square::B1) as u8,
+                    mask: b1,
+                    active_mask: b1,
+                },
+            ],
+            active_component_count: 2,
+            strict: true,
+            status: DecompositionStatus::Strict,
+            rejection_reason: None,
+        };
+
+        assert_eq!(
+            certificate.validate(),
+            Err(
+                DecompositionCertificateValidationError::CrossComponentAdjacency {
+                    first_component_index: 0,
+                    second_component_index: 1,
+                    first_square: Square::A1,
+                    second_square: Square::B1,
+                },
+            )
+        );
     }
 
     #[test]
