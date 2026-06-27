@@ -4,7 +4,7 @@
 //! a chess position into independent combinatorial game components.
 
 use shakmaty::{Bitboard, Board, Color};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// Standard Union-Find (Disjoint Set) over the 64 squares of a chessboard.
 #[derive(Clone, Debug)]
@@ -187,6 +187,106 @@ pub fn get_locked_pawns(board: &Board) -> Bitboard {
     locked
 }
 
+/// Outcome state for a decomposition certificate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecompositionStatus {
+    /// Existing locked-pawn barriers split active material into multiple components.
+    Strict,
+    /// The position did not produce a strict decomposition certificate.
+    Rejected,
+}
+
+/// Reason a position did not produce a strict decomposition certificate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecompositionRejectionReason {
+    /// No locked-pawn barrier was found, so no partition proof exists.
+    NoLockedBarrier,
+    /// Locked barriers exist, but active material does not span at least two components.
+    LessThanTwoActiveComponents,
+}
+
+/// A single active partition component in a decomposition certificate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecompositionComponent {
+    /// Root square index from the underlying union-find partition.
+    pub root: u8,
+    /// All non-barrier squares in this component.
+    pub mask: Bitboard,
+    /// Occupied, non-barrier squares in this component.
+    pub active_mask: Bitboard,
+}
+
+/// Certificate scaffold for locked-pawn barrier decompositions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecompositionCertificate {
+    /// Locked-pawn squares used as barriers.
+    pub barrier: Bitboard,
+    /// Components containing at least one occupied non-barrier square.
+    pub components: Vec<DecompositionComponent>,
+    /// Number of active components represented in `components`.
+    pub active_component_count: u8,
+    /// `true` when `status` is [`DecompositionStatus::Strict`].
+    pub strict: bool,
+    /// Strict/rejected certificate status.
+    pub status: DecompositionStatus,
+    /// Rejection reason for non-strict certificates.
+    pub rejection_reason: Option<DecompositionRejectionReason>,
+}
+
+/// Builds a decomposition certificate using locked-pawn barriers and the board partition.
+#[must_use]
+pub fn certify_decomposition(board: &Board) -> DecompositionCertificate {
+    let barrier = get_locked_pawns(board);
+    let mobile_pieces = board.occupied() & !barrier;
+    let mut uf = partition_board(barrier);
+    let mut components_by_root = BTreeMap::new();
+
+    for sq in mobile_pieces {
+        let root = uf.find(usize::from(sq));
+        components_by_root
+            .entry(root)
+            .or_insert_with(|| DecompositionComponent {
+                root: root as u8,
+                mask: Bitboard::EMPTY,
+                active_mask: Bitboard::EMPTY,
+            })
+            .active_mask
+            .add(sq);
+    }
+
+    for sq in !barrier {
+        let root = uf.find(usize::from(sq));
+        if let Some(component) = components_by_root.get_mut(&root) {
+            component.mask.add(sq);
+        }
+    }
+
+    let components: Vec<_> = components_by_root.into_values().collect();
+    let active_component_count = components.len() as u8;
+    let rejection_reason = if barrier.is_empty() {
+        Some(DecompositionRejectionReason::NoLockedBarrier)
+    } else if active_component_count < 2 {
+        Some(DecompositionRejectionReason::LessThanTwoActiveComponents)
+    } else {
+        None
+    };
+    let strict = rejection_reason.is_none();
+    let status = if strict {
+        DecompositionStatus::Strict
+    } else {
+        DecompositionStatus::Rejected
+    };
+
+    DecompositionCertificate {
+        barrier,
+        components,
+        active_component_count,
+        strict,
+        status,
+        rejection_reason,
+    }
+}
+
 /// Finds active topological subsystems separated by locked-pawn barriers.
 #[must_use]
 pub fn find_subsystems(board: &Board) -> (bool, u8) {
@@ -206,8 +306,42 @@ pub fn find_subsystems(board: &Board) -> (bool, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shakmaty::{CastlingMode, Chess, Position, Square, fen::Fen};
+    use shakmaty::{Board, CastlingMode, Chess, Color, Position, Rank, Square, fen::Fen};
     use std::str::FromStr;
+
+    fn locked_horizontal_chain_board() -> Board {
+        let mut board = Board::empty();
+
+        for sq in [
+            Square::A4,
+            Square::B4,
+            Square::C4,
+            Square::D4,
+            Square::E4,
+            Square::F4,
+            Square::G4,
+            Square::H4,
+        ] {
+            board.set_piece_at(sq, Color::White.pawn());
+        }
+
+        for sq in [
+            Square::A5,
+            Square::B5,
+            Square::C5,
+            Square::D5,
+            Square::E5,
+            Square::F5,
+            Square::G5,
+            Square::H5,
+        ] {
+            board.set_piece_at(sq, Color::White.pawn());
+        }
+
+        board.set_piece_at(Square::A1, Color::White.knight());
+        board.set_piece_at(Square::H8, Color::Black.knight());
+        board
+    }
 
     #[test]
     fn test_empty_board() {
@@ -288,6 +422,51 @@ mod tests {
 
         assert!(!uf.contains(usize::from(Square::A4)));
         assert!(uf.contains(usize::from(Square::A3)));
+    }
+
+    #[test]
+    fn test_certificate_rejects_without_locked_barrier() {
+        let certificate = certify_decomposition(&Board::new());
+
+        assert_eq!(certificate.status, DecompositionStatus::Rejected);
+        assert!(!certificate.strict);
+        assert_eq!(
+            certificate.rejection_reason,
+            Some(DecompositionRejectionReason::NoLockedBarrier)
+        );
+        assert!(certificate.barrier.is_empty());
+        assert_eq!(certificate.active_component_count, 1);
+    }
+
+    #[test]
+    fn test_locked_chain_produces_strict_multi_component_certificate() {
+        let board = locked_horizontal_chain_board();
+        let certificate = certify_decomposition(&board);
+        let certified_active = certificate
+            .components
+            .iter()
+            .fold(Bitboard::EMPTY, |acc, component| {
+                acc | component.active_mask
+            });
+
+        assert_eq!(certificate.status, DecompositionStatus::Strict);
+        assert!(certificate.strict);
+        assert_eq!(certificate.rejection_reason, None);
+        assert_eq!(certificate.barrier, Bitboard::from_rank(Rank::Fourth));
+        assert_eq!(certificate.active_component_count, 2);
+        assert_eq!(certificate.components.len(), 2);
+        assert_eq!(certified_active, board.occupied() & !certificate.barrier);
+    }
+
+    #[test]
+    fn test_certificate_excludes_barrier_squares_from_components() {
+        let certificate = certify_decomposition(&locked_horizontal_chain_board());
+
+        for component in &certificate.components {
+            assert!(component.mask.is_disjoint(certificate.barrier));
+            assert!(component.active_mask.is_disjoint(certificate.barrier));
+            assert!(component.active_mask.is_subset(component.mask));
+        }
     }
 
     #[test]
