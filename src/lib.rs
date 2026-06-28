@@ -4,7 +4,10 @@
 //! a chess position into independent combinatorial game components.
 
 use shakmaty::{Bitboard, Board, Color, Square};
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+};
 
 /// Standard Union-Find (Disjoint Set) over the 64 squares of a chessboard.
 #[derive(Clone, Debug)]
@@ -233,6 +236,49 @@ pub struct DecompositionCertificate {
     pub rejection_reason: Option<DecompositionRejectionReason>,
 }
 
+/// Stable structural digest for a decomposition certificate.
+///
+/// This is the SHA-256 digest of the certificate's versioned canonical payload.
+/// It is useful for label provenance and equality checks, but it is still only
+/// a digest of the structural certificate fields validated by
+/// [`DecompositionCertificate::validate`].
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DecompositionCertificateDigest([u8; 32]);
+
+impl DecompositionCertificateDigest {
+    /// Returns the raw digest bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Returns the raw digest bytes by value.
+    #[must_use]
+    pub fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+
+    /// Returns the digest encoded as lowercase hexadecimal.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        let mut hex = String::with_capacity(64);
+        for byte in self.0 {
+            use fmt::Write as _;
+            write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        hex
+    }
+}
+
+impl fmt::Display for DecompositionCertificateDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Structural validation error for a [`DecompositionCertificate`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecompositionCertificateValidationError {
@@ -265,6 +311,8 @@ pub enum DecompositionCertificateValidationError {
         /// Number of active components actually present.
         active_component_count: usize,
     },
+    /// A strict certificate cannot be justified without at least one barrier square.
+    StrictWithoutBarrier,
     /// A strict certificate carries a rejection reason.
     StrictWithRejectionReason {
         /// Rejection reason present on the strict certificate.
@@ -272,12 +320,52 @@ pub enum DecompositionCertificateValidationError {
     },
     /// A rejected certificate does not carry a rejection reason.
     RejectedWithoutRejectionReason,
+    /// A `NoLockedBarrier` rejection cannot contain barrier squares.
+    NoLockedBarrierRejectionWithBarrier,
+    /// A `NoLockedBarrier` rejection cannot describe multiple active components.
+    NoLockedBarrierRejectionWithMultipleActiveComponents {
+        /// Number of active components actually present.
+        active_component_count: usize,
+    },
+    /// A `LessThanTwoActiveComponents` rejection still needs a barrier.
+    LessThanTwoActiveComponentsRejectionWithoutBarrier,
+    /// A `LessThanTwoActiveComponents` rejection cannot have two or more active components.
+    LessThanTwoActiveComponentsRejectionWithTooManyActiveComponents {
+        /// Number of active components actually present.
+        active_component_count: usize,
+    },
+    /// A component has no squares in its component mask.
+    EmptyComponentMask {
+        /// Index of the invalid component.
+        component_index: usize,
+    },
+    /// A certified active component has no active squares.
+    ComponentWithoutActiveSquares {
+        /// Index of the invalid component.
+        component_index: usize,
+    },
+    /// A component's root square is not inside its component mask.
+    ComponentRootOutsideMask {
+        /// Index of the invalid component.
+        component_index: usize,
+        /// Root square index stored on the invalid component.
+        root: u8,
+    },
     /// Two component masks overlap.
     ComponentMasksOverlap {
         /// Index of the first overlapping component.
         first_component_index: usize,
         /// Index of the second overlapping component.
         second_component_index: usize,
+    },
+    /// Two components use the same root square.
+    DuplicateComponentRoot {
+        /// Index of the first component using this root.
+        first_component_index: usize,
+        /// Index of the second component using this root.
+        second_component_index: usize,
+        /// Duplicate root square index.
+        root: u8,
     },
     /// Two distinct certified components have adjacent non-barrier squares.
     CrossComponentAdjacency {
@@ -293,6 +381,29 @@ pub enum DecompositionCertificateValidationError {
 }
 
 impl DecompositionCertificate {
+    /// Returns a versioned canonical byte payload for stable provenance labels.
+    ///
+    /// Components are serialized in sorted order, so equivalent certificates do
+    /// not depend on the caller's component vector order. Validation is run
+    /// before serialization. The resulting payload is a structural certificate,
+    /// not a proof of full legal-chess dynamic independence.
+    pub fn canonical_payload(&self) -> Result<Vec<u8>, DecompositionCertificateValidationError> {
+        self.validate()?;
+        Ok(self.canonical_payload_unchecked())
+    }
+
+    /// Returns a stable SHA-256 digest of this certificate's canonical payload.
+    ///
+    /// Validation is run before hashing. The digest is deterministic across
+    /// process runs for the same validated structural certificate.
+    pub fn digest(
+        &self,
+    ) -> Result<DecompositionCertificateDigest, DecompositionCertificateValidationError> {
+        Ok(DecompositionCertificateDigest(sha256(
+            &self.canonical_payload()?,
+        )))
+    }
+
     /// Validates bounded structural invariants for this certificate.
     ///
     /// This checks mask/status consistency and audits 8-way adjacency between
@@ -327,6 +438,9 @@ impl DecompositionCertificate {
                         },
                     );
                 }
+                if self.barrier.is_empty() {
+                    return Err(DecompositionCertificateValidationError::StrictWithoutBarrier);
+                }
                 if let Some(rejection_reason) = self.rejection_reason {
                     return Err(
                         DecompositionCertificateValidationError::StrictWithRejectionReason {
@@ -336,16 +450,57 @@ impl DecompositionCertificate {
                 }
             }
             DecompositionStatus::Rejected => {
-                if self.rejection_reason.is_none() {
-                    return Err(
-                        DecompositionCertificateValidationError::RejectedWithoutRejectionReason,
-                    );
+                use DecompositionCertificateValidationError as Error;
+
+                match self.rejection_reason {
+                    Some(DecompositionRejectionReason::NoLockedBarrier) => {
+                        if !self.barrier.is_empty() {
+                            return Err(Error::NoLockedBarrierRejectionWithBarrier);
+                        }
+                        if self.components.len() > 1 {
+                            return Err(
+                                Error::NoLockedBarrierRejectionWithMultipleActiveComponents {
+                                    active_component_count: self.components.len(),
+                                },
+                            );
+                        }
+                    }
+                    Some(DecompositionRejectionReason::LessThanTwoActiveComponents) => {
+                        if self.barrier.is_empty() {
+                            return Err(Error::LessThanTwoActiveComponentsRejectionWithoutBarrier);
+                        }
+                        if self.components.len() >= 2 {
+                            return Err(
+                                Error::LessThanTwoActiveComponentsRejectionWithTooManyActiveComponents {
+                                    active_component_count: self.components.len(),
+                                },
+                            );
+                        }
+                    }
+                    None => {
+                        return Err(Error::RejectedWithoutRejectionReason);
+                    }
                 }
             }
         }
 
         let mut component_by_square = [None; 64];
+        let mut component_by_root = [None; 64];
         for (component_index, component) in self.components.iter().enumerate() {
+            if component.mask.is_empty() {
+                return Err(
+                    DecompositionCertificateValidationError::EmptyComponentMask { component_index },
+                );
+            }
+
+            if component.active_mask.is_empty() {
+                return Err(
+                    DecompositionCertificateValidationError::ComponentWithoutActiveSquares {
+                        component_index,
+                    },
+                );
+            }
+
             if !component.mask.is_disjoint(self.barrier) {
                 return Err(
                     DecompositionCertificateValidationError::ComponentIntersectsBarrier {
@@ -361,6 +516,28 @@ impl DecompositionCertificate {
                     },
                 );
             }
+
+            let root_bit = 1u64.checked_shl(u32::from(component.root)).unwrap_or(0);
+            if bitboard_bits(component.mask) & root_bit == 0 {
+                return Err(
+                    DecompositionCertificateValidationError::ComponentRootOutsideMask {
+                        component_index,
+                        root: component.root,
+                    },
+                );
+            }
+
+            let root_index = usize::from(component.root);
+            if let Some(first_component_index) = component_by_root[root_index] {
+                return Err(
+                    DecompositionCertificateValidationError::DuplicateComponentRoot {
+                        first_component_index,
+                        second_component_index: component_index,
+                        root: component.root,
+                    },
+                );
+            }
+            component_by_root[root_index] = Some(component_index);
 
             for sq in component.mask {
                 let square_index = usize::from(sq);
@@ -399,6 +576,142 @@ impl DecompositionCertificate {
         }
 
         Ok(())
+    }
+
+    fn canonical_payload_unchecked(&self) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(22 + self.components.len() * 17);
+        payload.extend_from_slice(b"BMDCERT\0");
+        payload.push(1);
+        payload.push(decomposition_status_tag(self.status));
+        payload.push(u8::from(self.strict));
+        payload.push(decomposition_rejection_reason_tag(self.rejection_reason));
+        payload.push(self.active_component_count);
+        payload.extend_from_slice(&bitboard_bits(self.barrier).to_le_bytes());
+        payload.push(self.components.len() as u8);
+
+        let mut components: Vec<_> = self.components.iter().collect();
+        components.sort_by_key(|component| {
+            (
+                component.root,
+                bitboard_bits(component.mask),
+                bitboard_bits(component.active_mask),
+            )
+        });
+
+        for component in components {
+            payload.push(component.root);
+            payload.extend_from_slice(&bitboard_bits(component.mask).to_le_bytes());
+            payload.extend_from_slice(&bitboard_bits(component.active_mask).to_le_bytes());
+        }
+
+        payload
+    }
+}
+
+fn bitboard_bits(mask: Bitboard) -> u64 {
+    mask.into()
+}
+
+fn decomposition_status_tag(status: DecompositionStatus) -> u8 {
+    match status {
+        DecompositionStatus::Strict => 1,
+        DecompositionStatus::Rejected => 2,
+    }
+}
+
+fn decomposition_rejection_reason_tag(reason: Option<DecompositionRejectionReason>) -> u8 {
+    match reason {
+        None => 0,
+        Some(DecompositionRejectionReason::NoLockedBarrier) => 1,
+        Some(DecompositionRejectionReason::LessThanTwoActiveComponents) => 2,
+    }
+}
+
+const SHA256_INITIAL_HASH: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
+
+const SHA256_ROUND_CONSTANTS: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+fn sha256(payload: &[u8]) -> [u8; 32] {
+    let mut state = SHA256_INITIAL_HASH;
+    let bit_len = (payload.len() as u64).wrapping_mul(8);
+    let mut padded = payload.to_vec();
+
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    for block in padded.chunks_exact(64) {
+        sha256_compress(&mut state, block);
+    }
+
+    let mut digest = [0; 32];
+    for (chunk, word) in digest.chunks_exact_mut(4).zip(state) {
+        chunk.copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
+fn sha256_compress(state: &mut [u32; 8], block: &[u8]) {
+    let mut words = [0; 64];
+
+    for (word, bytes) in words.iter_mut().take(16).zip(block.chunks_exact(4)) {
+        *word = u32::from_be_bytes(
+            bytes
+                .try_into()
+                .expect("SHA-256 block chunks are exactly four bytes"),
+        );
+    }
+
+    for i in 16..64 {
+        let s0 =
+            words[i - 15].rotate_right(7) ^ words[i - 15].rotate_right(18) ^ (words[i - 15] >> 3);
+        let s1 =
+            words[i - 2].rotate_right(17) ^ words[i - 2].rotate_right(19) ^ (words[i - 2] >> 10);
+        words[i] = words[i - 16]
+            .wrapping_add(s0)
+            .wrapping_add(words[i - 7])
+            .wrapping_add(s1);
+    }
+
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+
+    for (&word, &round_constant) in words.iter().zip(SHA256_ROUND_CONSTANTS.iter()) {
+        let sum1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let ch = (e & f) ^ (!e & g);
+        let temp1 = h
+            .wrapping_add(sum1)
+            .wrapping_add(ch)
+            .wrapping_add(round_constant)
+            .wrapping_add(word);
+        let sum0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = sum0.wrapping_add(maj);
+
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
+
+    for (current, compressed) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+        *current = current.wrapping_add(compressed);
     }
 }
 
@@ -527,6 +840,14 @@ mod tests {
         board.set_piece_at(Square::A1, Color::White.knight());
         board.set_piece_at(Square::H8, Color::Black.knight());
         board
+    }
+
+    #[test]
+    fn test_sha256_known_answer() {
+        assert_eq!(
+            DecompositionCertificateDigest(sha256(b"abc")).to_hex(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
@@ -665,6 +986,174 @@ mod tests {
     }
 
     #[test]
+    fn test_certificate_canonical_payload_and_digest_are_stable() {
+        let certificate = certify_decomposition(&locked_horizontal_chain_board());
+        certificate.validate().unwrap();
+
+        let payload = certificate.canonical_payload().unwrap();
+        let digest = certificate.digest().unwrap();
+
+        assert_eq!(payload, certificate.canonical_payload().unwrap());
+        assert_eq!(digest, certificate.digest().unwrap());
+        assert_eq!(digest.as_bytes().len(), 32);
+        assert_eq!(digest.to_string(), digest.to_hex());
+    }
+
+    #[test]
+    fn test_certificate_canonical_payload_ignores_component_order() {
+        let certificate = certify_decomposition(&locked_horizontal_chain_board());
+        let mut reordered = certificate.clone();
+        reordered.components.reverse();
+
+        certificate.validate().unwrap();
+        reordered.validate().unwrap();
+
+        assert_eq!(
+            certificate.canonical_payload().unwrap(),
+            reordered.canonical_payload().unwrap()
+        );
+        assert_eq!(certificate.digest().unwrap(), reordered.digest().unwrap());
+    }
+
+    #[test]
+    fn test_structurally_different_certificates_hash_differently() {
+        let certificate = certify_decomposition(&locked_horizontal_chain_board());
+        let mut changed = certificate.clone();
+        let component = changed
+            .components
+            .first_mut()
+            .expect("strict test certificate has components");
+        let mut added_square = None;
+
+        for sq in component.mask {
+            if !component.active_mask.contains(sq) {
+                component.active_mask.add(sq);
+                added_square = Some(sq);
+                break;
+            }
+        }
+
+        assert!(added_square.is_some());
+        certificate.validate().unwrap();
+        changed.validate().unwrap();
+
+        assert_ne!(
+            certificate.canonical_payload().unwrap(),
+            changed.canonical_payload().unwrap()
+        );
+        assert_ne!(certificate.digest().unwrap(), changed.digest().unwrap());
+    }
+
+    #[test]
+    fn test_certificate_digest_rejects_invalid_certificate() {
+        let mut certificate = certify_decomposition(&locked_horizontal_chain_board());
+        certificate.active_component_count = 1;
+
+        assert_eq!(
+            certificate.digest(),
+            Err(
+                DecompositionCertificateValidationError::ActiveComponentCountMismatch {
+                    declared: 1,
+                    actual: 2,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_certificate_validation_rejects_strict_status_mismatch() {
+        let mut certificate = certify_decomposition(&locked_horizontal_chain_board());
+        certificate.strict = false;
+
+        assert_eq!(
+            certificate.validate(),
+            Err(
+                DecompositionCertificateValidationError::StrictStatusMismatch {
+                    strict: false,
+                    status: DecompositionStatus::Strict,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_certificate_validation_rejects_strict_without_barrier() {
+        let mut certificate = certify_decomposition(&locked_horizontal_chain_board());
+        certificate.barrier = Bitboard::EMPTY;
+
+        assert_eq!(
+            certificate.validate(),
+            Err(DecompositionCertificateValidationError::StrictWithoutBarrier)
+        );
+    }
+
+    #[test]
+    fn test_certificate_validation_rejects_component_barrier_overlap() {
+        let mut certificate = certify_decomposition(&locked_horizontal_chain_board());
+        certificate.components[0].mask.add(Square::A4);
+
+        assert_eq!(
+            certificate.validate(),
+            Err(
+                DecompositionCertificateValidationError::ComponentIntersectsBarrier {
+                    component_index: 0,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_certificate_validation_rejects_active_mask_outside_component() {
+        let mut certificate = certify_decomposition(&locked_horizontal_chain_board());
+        let outside_square = certificate.components[1]
+            .mask
+            .into_iter()
+            .next()
+            .expect("test certificate has a second component");
+        certificate.components[0].active_mask.add(outside_square);
+
+        assert_eq!(
+            certificate.validate(),
+            Err(
+                DecompositionCertificateValidationError::ActiveMaskOutsideComponent {
+                    component_index: 0,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_certificate_validation_rejects_empty_active_component() {
+        let mut certificate = certify_decomposition(&locked_horizontal_chain_board());
+        certificate.components[0].active_mask = Bitboard::EMPTY;
+
+        assert_eq!(
+            certificate.validate(),
+            Err(
+                DecompositionCertificateValidationError::ComponentWithoutActiveSquares {
+                    component_index: 0,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_certificate_validation_rejects_component_root_outside_mask() {
+        let mut certificate = certify_decomposition(&locked_horizontal_chain_board());
+        certificate.components[0].root = 64;
+
+        assert_eq!(
+            certificate.validate(),
+            Err(
+                DecompositionCertificateValidationError::ComponentRootOutsideMask {
+                    component_index: 0,
+                    root: 64,
+                },
+            )
+        );
+    }
+
+    #[test]
     fn test_certificate_validation_rejects_active_component_count_mismatch() {
         let mut certificate = certify_decomposition(&locked_horizontal_chain_board());
         certificate.active_component_count = 1;
@@ -683,8 +1172,9 @@ mod tests {
     #[test]
     fn test_certificate_validation_rejects_overlapping_component_masks() {
         let overlap = Bitboard::from_square(Square::A1);
+        let second = overlap | Bitboard::from_square(Square::B1);
         let certificate = DecompositionCertificate {
-            barrier: Bitboard::EMPTY,
+            barrier: Bitboard::from_square(Square::H8),
             components: vec![
                 DecompositionComponent {
                     root: usize::from(Square::A1) as u8,
@@ -692,9 +1182,9 @@ mod tests {
                     active_mask: overlap,
                 },
                 DecompositionComponent {
-                    root: usize::from(Square::A1) as u8,
-                    mask: overlap,
-                    active_mask: overlap,
+                    root: usize::from(Square::B1) as u8,
+                    mask: second,
+                    active_mask: Bitboard::from_square(Square::B1),
                 },
             ],
             active_component_count: 2,
@@ -719,7 +1209,7 @@ mod tests {
         let a1 = Bitboard::from_square(Square::A1);
         let b1 = Bitboard::from_square(Square::B1);
         let certificate = DecompositionCertificate {
-            barrier: Bitboard::EMPTY,
+            barrier: Bitboard::from_square(Square::H8),
             components: vec![
                 DecompositionComponent {
                     root: usize::from(Square::A1) as u8,
