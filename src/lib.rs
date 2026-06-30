@@ -5,7 +5,7 @@
 
 use shakmaty::{Bitboard, Board, Color, Square};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
 };
 
@@ -336,9 +336,36 @@ impl fmt::Display for CompositionCertificateDigest {
 pub enum CompositionCertificateValidationError {
     /// A composition certificate needs at least one component value.
     EmptyComponentValues,
+    /// The referenced decomposition certificate is structurally invalid.
+    InvalidDecompositionCertificate {
+        /// Validation error returned by the decomposition certificate.
+        error: DecompositionCertificateValidationError,
+    },
+    /// The decomposition digest does not match the referenced certificate.
+    DecompositionDigestMismatch {
+        /// Digest of the referenced decomposition certificate.
+        certificate_digest: DecompositionCertificateDigest,
+        /// Digest carried by the composition certificate.
+        composition_digest: DecompositionCertificateDigest,
+    },
+    /// Composition certificates only support strict decomposition certificates.
+    CompositionRequiresStrictDecomposition {
+        /// Status of the referenced decomposition certificate.
+        status: DecompositionStatus,
+    },
     /// Component exact value digest is empty.
     EmptyComponentValueDigest {
         /// Component root with the empty value digest.
+        component_root: u8,
+    },
+    /// A strict decomposition component is missing from the composition.
+    MissingComponentRoot {
+        /// Missing root square index.
+        component_root: u8,
+    },
+    /// A composition component root is not present in the decomposition.
+    UnexpectedComponentRoot {
+        /// Unexpected root square index.
         component_root: u8,
     },
     /// Two component values refer to the same component root.
@@ -392,6 +419,76 @@ impl CompositionCertificate {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Validates this composition certificate against the concrete decomposition it cites.
+    ///
+    /// This is the checker downstream generators should run before promoting a
+    /// composed row to exact supervision. It verifies that the referenced
+    /// decomposition certificate is valid and strict, that its digest matches
+    /// [`CompositionCertificate::decomposition_digest`], and that every strict
+    /// decomposition component root has exactly one component value.
+    pub fn validate_against_decomposition(
+        &self,
+        decomposition: &DecompositionCertificate,
+    ) -> Result<(), CompositionCertificateValidationError> {
+        self.validate()?;
+
+        decomposition.validate().map_err(|error| {
+            CompositionCertificateValidationError::InvalidDecompositionCertificate { error }
+        })?;
+
+        if decomposition.status != DecompositionStatus::Strict {
+            return Err(
+                CompositionCertificateValidationError::CompositionRequiresStrictDecomposition {
+                    status: decomposition.status,
+                },
+            );
+        }
+
+        let certificate_digest = decomposition.digest().map_err(|error| {
+            CompositionCertificateValidationError::InvalidDecompositionCertificate { error }
+        })?;
+        if certificate_digest != self.decomposition_digest {
+            return Err(
+                CompositionCertificateValidationError::DecompositionDigestMismatch {
+                    certificate_digest,
+                    composition_digest: self.decomposition_digest,
+                },
+            );
+        }
+
+        let expected_roots = decomposition
+            .components
+            .iter()
+            .map(|component| component.root)
+            .collect::<BTreeSet<_>>();
+        let actual_roots = self
+            .component_values
+            .iter()
+            .map(|component| component.component_root)
+            .collect::<BTreeSet<_>>();
+
+        for component_root in &expected_roots {
+            if !actual_roots.contains(component_root) {
+                return Err(
+                    CompositionCertificateValidationError::MissingComponentRoot {
+                        component_root: *component_root,
+                    },
+                );
+            }
+        }
+        for component_root in actual_roots {
+            if !expected_roots.contains(&component_root) {
+                return Err(
+                    CompositionCertificateValidationError::UnexpectedComponentRoot {
+                        component_root,
+                    },
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -1203,8 +1300,13 @@ mod tests {
         );
     }
 
-    fn sample_composition_certificate() -> CompositionCertificate {
-        let decomposition = certify_decomposition(&locked_horizontal_chain_board());
+    fn sample_decomposition_certificate() -> DecompositionCertificate {
+        certify_decomposition(&locked_horizontal_chain_board())
+    }
+
+    fn sample_composition_certificate_for(
+        decomposition: &DecompositionCertificate,
+    ) -> CompositionCertificate {
         let decomposition_digest = decomposition.digest().unwrap();
         let mut roots = decomposition
             .components
@@ -1215,18 +1317,31 @@ mod tests {
 
         CompositionCertificate {
             decomposition_digest,
-            component_values: vec![
-                CompositionComponentValue {
-                    component_root: roots[0],
-                    value_digest: "thermograph:left-component".to_owned(),
-                },
-                CompositionComponentValue {
-                    component_root: roots[1],
-                    value_digest: "thermograph:right-component".to_owned(),
-                },
-            ],
+            component_values: roots
+                .iter()
+                .map(|root| CompositionComponentValue {
+                    component_root: *root,
+                    value_digest: format!("thermograph:component-{root}"),
+                })
+                .collect(),
             result_value_digest: "thermograph:sum-result".to_owned(),
         }
+    }
+
+    fn sample_composition_certificate() -> CompositionCertificate {
+        let decomposition = certify_decomposition(&locked_horizontal_chain_board());
+        sample_composition_certificate_for(&decomposition)
+    }
+
+    fn component_root_not_in(decomposition: &DecompositionCertificate) -> u8 {
+        let roots = decomposition
+            .components
+            .iter()
+            .map(|component| component.root)
+            .collect::<HashSet<_>>();
+        (0..64)
+            .find(|root| !roots.contains(root))
+            .expect("test decomposition leaves at least one root unused")
     }
 
     #[test]
@@ -1280,6 +1395,112 @@ mod tests {
             certificate.digest(),
             Err(
                 CompositionCertificateValidationError::EmptyComponentValueDigest { component_root },
+            )
+        );
+    }
+
+    #[test]
+    fn test_composition_certificate_validates_against_decomposition() {
+        let decomposition = sample_decomposition_certificate();
+        let certificate = sample_composition_certificate_for(&decomposition);
+
+        assert_eq!(
+            certificate.validate_against_decomposition(&decomposition),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_composition_certificate_rejects_stale_decomposition_digest() {
+        let decomposition = sample_decomposition_certificate();
+        let mut certificate = sample_composition_certificate_for(&decomposition);
+        let stale_digest = DecompositionCertificateDigest(sha256(b"stale-decomposition"));
+        certificate.decomposition_digest = stale_digest;
+
+        assert_eq!(
+            certificate.validate_against_decomposition(&decomposition),
+            Err(
+                CompositionCertificateValidationError::DecompositionDigestMismatch {
+                    certificate_digest: decomposition.digest().unwrap(),
+                    composition_digest: stale_digest,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_composition_certificate_rejects_missing_decomposition_root() {
+        let decomposition = sample_decomposition_certificate();
+        let mut certificate = sample_composition_certificate_for(&decomposition);
+        let missing_root = certificate
+            .component_values
+            .pop()
+            .expect("sample composition has component values")
+            .component_root;
+
+        assert_eq!(
+            certificate.validate_against_decomposition(&decomposition),
+            Err(
+                CompositionCertificateValidationError::MissingComponentRoot {
+                    component_root: missing_root,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn test_composition_certificate_rejects_unexpected_component_root() {
+        let decomposition = sample_decomposition_certificate();
+        let mut certificate = sample_composition_certificate_for(&decomposition);
+        let unexpected_root = component_root_not_in(&decomposition);
+        certificate
+            .component_values
+            .push(CompositionComponentValue {
+                component_root: unexpected_root,
+                value_digest: "thermograph:unexpected-component".to_owned(),
+            });
+
+        assert_eq!(
+            certificate.validate_against_decomposition(&decomposition),
+            Err(
+                CompositionCertificateValidationError::UnexpectedComponentRoot {
+                    component_root: unexpected_root,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn test_composition_certificate_requires_strict_decomposition() {
+        let rejected_decomposition = certify_decomposition(&Board::empty());
+        let mut certificate = sample_composition_certificate();
+        certificate.decomposition_digest = rejected_decomposition.digest().unwrap();
+
+        assert_eq!(
+            certificate.validate_against_decomposition(&rejected_decomposition),
+            Err(
+                CompositionCertificateValidationError::CompositionRequiresStrictDecomposition {
+                    status: DecompositionStatus::Rejected,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_composition_certificate_rejects_invalid_decomposition() {
+        let mut decomposition = sample_decomposition_certificate();
+        let certificate = sample_composition_certificate_for(&decomposition);
+        decomposition.active_component_count = 1;
+
+        assert_eq!(
+            certificate.validate_against_decomposition(&decomposition),
+            Err(
+                CompositionCertificateValidationError::InvalidDecompositionCertificate {
+                    error: DecompositionCertificateValidationError::ActiveComponentCountMismatch {
+                        declared: 1,
+                        actual: 2,
+                    },
+                },
             )
         );
     }

@@ -36,3 +36,19 @@ assert_eq!(num_components, 1);
 ## Research Context
 
 Bitmesh was developed to generate training data for Game-Theoretic Representation Learning models, providing the structural decoupling required to sum sub-games in complex endgames.
+
+## Composition Certificates
+
+Bitmesh exposes a BMCOMPOSE v1 provenance certificate for composed exact labels.
+A `CompositionCertificate` binds:
+
+- the digest of a validated strict `DecompositionCertificate`
+- one component value digest per decomposition component root
+- the digest of the composed result value payload
+
+Before a downstream generator promotes a composed row to exact supervision, it
+should call `CompositionCertificate::validate_against_decomposition(&cert)`.
+That check verifies structural composition metadata: strict decomposition status,
+fresh decomposition digest, duplicate-root rejection, and exact component-root
+coverage. It does not prove chess value correctness by itself; the generator
+must still verify component values and recompute the composed result value.
