@@ -279,6 +279,143 @@ impl fmt::Display for DecompositionCertificateDigest {
     }
 }
 
+/// Exact value assigned to one certified component.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompositionComponentValue {
+    /// Component root from the decomposition certificate.
+    pub component_root: u8,
+    /// Stable digest of the component exact value payload.
+    pub value_digest: String,
+}
+
+/// Certificate that a result value is composed from independently certified components.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompositionCertificate {
+    /// Digest of the validated decomposition certificate used for components.
+    pub decomposition_digest: DecompositionCertificateDigest,
+    /// Exact value digest for each component.
+    pub component_values: Vec<CompositionComponentValue>,
+    /// Stable digest of the composed exact result value payload.
+    pub result_value_digest: String,
+}
+
+/// Stable structural digest for a composition certificate.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CompositionCertificateDigest([u8; 32]);
+
+impl CompositionCertificateDigest {
+    /// Returns the raw digest bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Returns the digest encoded as lowercase hexadecimal.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        let mut hex = String::with_capacity(64);
+        for byte in self.0 {
+            use fmt::Write as _;
+            write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        hex
+    }
+}
+
+impl fmt::Display for CompositionCertificateDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Structural validation error for a [`CompositionCertificate`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompositionCertificateValidationError {
+    /// A composition certificate needs at least one component value.
+    EmptyComponentValues,
+    /// Component exact value digest is empty.
+    EmptyComponentValueDigest {
+        /// Component root with the empty value digest.
+        component_root: u8,
+    },
+    /// Two component values refer to the same component root.
+    DuplicateComponentRoot {
+        /// Duplicate root square index.
+        component_root: u8,
+    },
+    /// The composed result exact value digest is empty.
+    EmptyResultValueDigest,
+}
+
+impl CompositionCertificate {
+    /// Returns a versioned canonical byte payload for stable provenance labels.
+    pub fn canonical_payload(&self) -> Result<Vec<u8>, CompositionCertificateValidationError> {
+        self.validate()?;
+        Ok(self.canonical_payload_unchecked())
+    }
+
+    /// Returns a stable SHA-256 digest of this certificate's canonical payload.
+    pub fn digest(
+        &self,
+    ) -> Result<CompositionCertificateDigest, CompositionCertificateValidationError> {
+        Ok(CompositionCertificateDigest(sha256(
+            &self.canonical_payload()?,
+        )))
+    }
+
+    /// Validates structural invariants for this composition certificate.
+    pub fn validate(&self) -> Result<(), CompositionCertificateValidationError> {
+        if self.component_values.is_empty() {
+            return Err(CompositionCertificateValidationError::EmptyComponentValues);
+        }
+        if self.result_value_digest.is_empty() {
+            return Err(CompositionCertificateValidationError::EmptyResultValueDigest);
+        }
+
+        let mut roots = HashSet::new();
+        for component in &self.component_values {
+            if component.value_digest.is_empty() {
+                return Err(
+                    CompositionCertificateValidationError::EmptyComponentValueDigest {
+                        component_root: component.component_root,
+                    },
+                );
+            }
+            if !roots.insert(component.component_root) {
+                return Err(
+                    CompositionCertificateValidationError::DuplicateComponentRoot {
+                        component_root: component.component_root,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn canonical_payload_unchecked(&self) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"BMCOMPOSE\0");
+        payload.push(1);
+        payload.extend_from_slice(self.decomposition_digest.as_bytes());
+
+        let mut component_values = self.component_values.iter().collect::<Vec<_>>();
+        component_values
+            .sort_by_key(|component| (component.component_root, component.value_digest.as_str()));
+        let component_count =
+            u16::try_from(component_values.len()).expect("too many component values");
+        payload.extend_from_slice(&component_count.to_le_bytes());
+        for component in component_values {
+            payload.push(component.component_root);
+            push_len_prefixed_bytes(&mut payload, component.value_digest.as_bytes());
+        }
+        push_len_prefixed_bytes(&mut payload, self.result_value_digest.as_bytes());
+        payload
+    }
+}
+
 /// Structural validation error for a [`DecompositionCertificate`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecompositionCertificateValidationError {
@@ -625,6 +762,12 @@ fn decomposition_rejection_reason_tag(reason: Option<DecompositionRejectionReaso
         Some(DecompositionRejectionReason::NoLockedBarrier) => 1,
         Some(DecompositionRejectionReason::LessThanTwoActiveComponents) => 2,
     }
+}
+
+fn push_len_prefixed_bytes(payload: &mut Vec<u8>, bytes: &[u8]) {
+    let length = u16::try_from(bytes.len()).expect("certificate field is too large");
+    payload.extend_from_slice(&length.to_le_bytes());
+    payload.extend_from_slice(bytes);
 }
 
 const SHA256_INITIAL_HASH: [u32; 8] = [
@@ -1056,6 +1199,87 @@ mod tests {
                     declared: 1,
                     actual: 2,
                 },
+            )
+        );
+    }
+
+    fn sample_composition_certificate() -> CompositionCertificate {
+        let decomposition = certify_decomposition(&locked_horizontal_chain_board());
+        let decomposition_digest = decomposition.digest().unwrap();
+        let mut roots = decomposition
+            .components
+            .iter()
+            .map(|component| component.root)
+            .collect::<Vec<_>>();
+        roots.sort();
+
+        CompositionCertificate {
+            decomposition_digest,
+            component_values: vec![
+                CompositionComponentValue {
+                    component_root: roots[0],
+                    value_digest: "thermograph:left-component".to_owned(),
+                },
+                CompositionComponentValue {
+                    component_root: roots[1],
+                    value_digest: "thermograph:right-component".to_owned(),
+                },
+            ],
+            result_value_digest: "thermograph:sum-result".to_owned(),
+        }
+    }
+
+    #[test]
+    fn test_composition_certificate_payload_and_digest_are_stable() {
+        let certificate = sample_composition_certificate();
+        let payload = certificate.canonical_payload().unwrap();
+        let digest = certificate.digest().unwrap();
+
+        assert_eq!(payload, certificate.canonical_payload().unwrap());
+        assert_eq!(digest, certificate.digest().unwrap());
+        assert_eq!(digest.as_bytes().len(), 32);
+        assert_eq!(digest.to_string(), digest.to_hex());
+    }
+
+    #[test]
+    fn test_composition_certificate_ignores_component_value_order() {
+        let certificate = sample_composition_certificate();
+        let mut reordered = certificate.clone();
+        reordered.component_values.reverse();
+
+        assert_eq!(
+            certificate.canonical_payload().unwrap(),
+            reordered.canonical_payload().unwrap()
+        );
+        assert_eq!(certificate.digest().unwrap(), reordered.digest().unwrap());
+    }
+
+    #[test]
+    fn test_composition_certificate_rejects_duplicate_component_root() {
+        let mut certificate = sample_composition_certificate();
+        let duplicate_root = certificate.component_values[0].component_root;
+        certificate.component_values[1].component_root = duplicate_root;
+
+        assert_eq!(
+            certificate.validate(),
+            Err(
+                CompositionCertificateValidationError::DuplicateComponentRoot {
+                    component_root: duplicate_root,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_composition_certificate_rejects_missing_value_digest() {
+        let mut certificate = sample_composition_certificate();
+        let component_root = certificate.component_values[0].component_root;
+        certificate.component_values[0].value_digest.clear();
+
+        assert_eq!(
+            certificate.digest(),
+            Err(
+                CompositionCertificateValidationError::EmptyComponentValueDigest { component_root },
             )
         );
     }
