@@ -7,6 +7,7 @@ use shakmaty::{Bitboard, Board, Color, Square};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
+    str::FromStr,
 };
 
 /// Standard Union-Find (Disjoint Set) over the 64 squares of a chessboard.
@@ -236,6 +237,41 @@ pub struct DecompositionCertificate {
     pub rejection_reason: Option<DecompositionRejectionReason>,
 }
 
+/// Parse error for fixed-width SHA-256 certificate digests encoded as hex.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CertificateDigestParseError {
+    /// A SHA-256 digest must be exactly 64 hexadecimal bytes.
+    InvalidLength {
+        /// Number of bytes in the supplied string.
+        actual: usize,
+    },
+    /// The supplied string contains a non-hex byte.
+    InvalidHexByte {
+        /// Byte offset of the invalid byte.
+        index: usize,
+        /// Invalid byte value.
+        byte: u8,
+    },
+}
+
+impl fmt::Display for CertificateDigestParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CertificateDigestParseError::InvalidLength { actual } => {
+                write!(
+                    f,
+                    "SHA-256 certificate digest must be 64 hex bytes, got {actual}"
+                )
+            }
+            CertificateDigestParseError::InvalidHexByte { index, byte } => {
+                write!(f, "invalid hex byte 0x{byte:02x} at byte index {index}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CertificateDigestParseError {}
+
 /// Stable structural digest for a decomposition certificate.
 ///
 /// This is the SHA-256 digest of the certificate's versioned canonical payload.
@@ -258,6 +294,11 @@ impl DecompositionCertificateDigest {
         self.0
     }
 
+    /// Parses a fixed-width SHA-256 digest from hexadecimal text.
+    pub fn from_hex(hex: &str) -> Result<Self, CertificateDigestParseError> {
+        parse_sha256_hex(hex).map(Self)
+    }
+
     /// Returns the digest encoded as lowercase hexadecimal.
     #[must_use]
     pub fn to_hex(self) -> String {
@@ -267,6 +308,14 @@ impl DecompositionCertificateDigest {
             write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
         }
         hex
+    }
+}
+
+impl FromStr for DecompositionCertificateDigest {
+    type Err = CertificateDigestParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(s)
     }
 }
 
@@ -310,6 +359,17 @@ impl CompositionCertificateDigest {
         &self.0
     }
 
+    /// Returns the raw digest bytes by value.
+    #[must_use]
+    pub fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+
+    /// Parses a fixed-width SHA-256 digest from hexadecimal text.
+    pub fn from_hex(hex: &str) -> Result<Self, CertificateDigestParseError> {
+        parse_sha256_hex(hex).map(Self)
+    }
+
     /// Returns the digest encoded as lowercase hexadecimal.
     #[must_use]
     pub fn to_hex(self) -> String {
@@ -322,6 +382,14 @@ impl CompositionCertificateDigest {
     }
 }
 
+impl FromStr for CompositionCertificateDigest {
+    type Err = CertificateDigestParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(s)
+    }
+}
+
 impl fmt::Display for CompositionCertificateDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in self.0 {
@@ -329,6 +397,70 @@ impl fmt::Display for CompositionCertificateDigest {
         }
         Ok(())
     }
+}
+
+/// Stable digest for a decomposition certificate bound to concrete position text.
+///
+/// This hashes the validated structural certificate digest together with
+/// caller-supplied canonical position text and context. The context should
+/// describe the position text format or producer namespace.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PositionBoundDecompositionCertificateDigest([u8; 32]);
+
+impl PositionBoundDecompositionCertificateDigest {
+    /// Returns the raw digest bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Returns the raw digest bytes by value.
+    #[must_use]
+    pub fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+
+    /// Returns the digest encoded as lowercase hexadecimal.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        let mut hex = String::with_capacity(64);
+        for byte in self.0 {
+            use fmt::Write as _;
+            write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        hex
+    }
+}
+
+impl fmt::Display for PositionBoundDecompositionCertificateDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Hashes a validated decomposition certificate with canonical position context.
+///
+/// This is an additive helper for provenance labels that need to bind the
+/// structural certificate to a concrete position string without changing the
+/// existing structural certificate payload.
+pub fn position_bound_decomposition_certificate_digest(
+    certificate: &DecompositionCertificate,
+    canonical_position: &str,
+    context: &str,
+) -> Result<PositionBoundDecompositionCertificateDigest, DecompositionCertificateValidationError> {
+    let certificate_digest = certificate.digest()?;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"BMDPOSCERT\0");
+    payload.push(1);
+    payload.extend_from_slice(certificate_digest.as_bytes());
+    push_len_prefixed_bytes(&mut payload, canonical_position.as_bytes());
+    push_len_prefixed_bytes(&mut payload, context.as_bytes());
+    Ok(PositionBoundDecompositionCertificateDigest(sha256(
+        &payload,
+    )))
 }
 
 /// Structural validation error for a [`CompositionCertificate`].
@@ -612,6 +744,15 @@ pub enum DecompositionCertificateValidationError {
         /// Adjacent square in the second component.
         second_square: Square,
     },
+    /// A strict component mask omits a non-barrier square adjacent to it.
+    StrictComponentMaskNotClosed {
+        /// Index of the component with the incomplete mask.
+        component_index: usize,
+        /// Square in the component mask.
+        square: Square,
+        /// Adjacent non-barrier square omitted from all component masks.
+        omitted_square: Square,
+    },
 }
 
 impl DecompositionCertificate {
@@ -792,17 +933,32 @@ impl DecompositionCertificate {
                 for (file_delta, rank_delta) in EIGHT_WAY_DELTAS {
                     if let Some(adjacent) = adjacent_square(sq, file_delta, rank_delta) {
                         let adjacent_index = usize::from(adjacent);
-                        if let Some(adjacent_component_index) = component_by_square[adjacent_index]
-                            && adjacent_component_index != component_index
-                        {
-                            return Err(
-                                DecompositionCertificateValidationError::CrossComponentAdjacency {
-                                    first_component_index: component_index,
-                                    second_component_index: adjacent_component_index,
-                                    first_square: sq,
-                                    second_square: adjacent,
-                                },
-                            );
+                        match component_by_square[adjacent_index] {
+                            Some(adjacent_component_index) => {
+                                if adjacent_component_index != component_index {
+                                    return Err(
+                                        DecompositionCertificateValidationError::CrossComponentAdjacency {
+                                            first_component_index: component_index,
+                                            second_component_index: adjacent_component_index,
+                                            first_square: sq,
+                                            second_square: adjacent,
+                                        },
+                                    );
+                                }
+                            }
+                            None => {
+                                if self.status == DecompositionStatus::Strict
+                                    && !self.barrier.contains(adjacent)
+                                {
+                                    return Err(
+                                        DecompositionCertificateValidationError::StrictComponentMaskNotClosed {
+                                            component_index,
+                                            square: sq,
+                                            omitted_square: adjacent,
+                                        },
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -844,6 +1000,40 @@ impl DecompositionCertificate {
 
 fn bitboard_bits(mask: Bitboard) -> u64 {
     mask.into()
+}
+
+fn parse_sha256_hex(hex: &str) -> Result<[u8; 32], CertificateDigestParseError> {
+    let bytes = hex.as_bytes();
+    if bytes.len() != 64 {
+        return Err(CertificateDigestParseError::InvalidLength {
+            actual: bytes.len(),
+        });
+    }
+
+    let mut digest = [0; 32];
+    for (byte_index, chunk) in bytes.chunks_exact(2).enumerate() {
+        let high_index = byte_index * 2;
+        let high = hex_nibble(chunk[0]).ok_or(CertificateDigestParseError::InvalidHexByte {
+            index: high_index,
+            byte: chunk[0],
+        })?;
+        let low = hex_nibble(chunk[1]).ok_or(CertificateDigestParseError::InvalidHexByte {
+            index: high_index + 1,
+            byte: chunk[1],
+        })?;
+        digest[byte_index] = (high << 4) | low;
+    }
+
+    Ok(digest)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn decomposition_status_tag(status: DecompositionStatus) -> u8 {
@@ -1091,6 +1281,56 @@ mod tests {
     }
 
     #[test]
+    fn test_certificate_digest_hex_parsing_roundtrips() {
+        let decomposition_digest = DecompositionCertificateDigest(sha256(b"decomposition"));
+        let decomposition_hex = decomposition_digest.to_hex();
+        assert_eq!(
+            DecompositionCertificateDigest::from_hex(&decomposition_hex),
+            Ok(decomposition_digest)
+        );
+        assert_eq!(
+            decomposition_hex.parse::<DecompositionCertificateDigest>(),
+            Ok(decomposition_digest)
+        );
+        assert_eq!(
+            DecompositionCertificateDigest::from_hex(&decomposition_hex.to_uppercase()),
+            Ok(decomposition_digest)
+        );
+
+        let composition_digest = CompositionCertificateDigest(sha256(b"composition"));
+        let composition_hex = composition_digest.to_hex();
+        assert_eq!(
+            CompositionCertificateDigest::from_hex(&composition_hex),
+            Ok(composition_digest)
+        );
+        assert_eq!(
+            composition_hex.parse::<CompositionCertificateDigest>(),
+            Ok(composition_digest)
+        );
+        assert_eq!(
+            CompositionCertificateDigest::from_hex(&composition_hex.to_uppercase()),
+            Ok(composition_digest)
+        );
+    }
+
+    #[test]
+    fn test_certificate_digest_hex_parsing_rejects_invalid_input() {
+        assert_eq!(
+            DecompositionCertificateDigest::from_hex("abc"),
+            Err(CertificateDigestParseError::InvalidLength { actual: 3 })
+        );
+
+        let invalid_hex = format!("{}z", "0".repeat(63));
+        assert_eq!(
+            CompositionCertificateDigest::from_hex(&invalid_hex),
+            Err(CertificateDigestParseError::InvalidHexByte {
+                index: 63,
+                byte: b'z',
+            })
+        );
+    }
+
+    #[test]
     fn test_empty_board() {
         let mut uf = partition_board(Bitboard::from(0));
         // All squares should be connected.
@@ -1235,6 +1475,42 @@ mod tests {
 
         assert_eq!(payload, certificate.canonical_payload().unwrap());
         assert_eq!(digest, certificate.digest().unwrap());
+        assert_eq!(digest.as_bytes().len(), 32);
+        assert_eq!(digest.to_string(), digest.to_hex());
+    }
+
+    #[test]
+    fn test_position_bound_decomposition_digest_includes_position_context() {
+        let certificate = certify_decomposition(&locked_horizontal_chain_board());
+        let position = "8/8/8/PPPPPPPP/PPPPPPPP/8/8/N6n w - - 0 1";
+        let context = "bitmesh:test-fen";
+
+        let digest =
+            position_bound_decomposition_certificate_digest(&certificate, position, context)
+                .unwrap();
+        assert_eq!(
+            digest,
+            position_bound_decomposition_certificate_digest(&certificate, position, context)
+                .unwrap()
+        );
+        assert_ne!(
+            digest,
+            position_bound_decomposition_certificate_digest(
+                &certificate,
+                "8/8/8/PPPPPPPP/PPPPPPPP/8/8/NN5n w - - 0 1",
+                context,
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            digest,
+            position_bound_decomposition_certificate_digest(
+                &certificate,
+                position,
+                "bitmesh:alternate-context",
+            )
+            .unwrap()
+        );
         assert_eq!(digest.as_bytes().len(), 32);
         assert_eq!(digest.to_string(), digest.to_hex());
     }
@@ -1681,6 +1957,42 @@ mod tests {
                     second_component_index: 1,
                     first_square: Square::A1,
                     second_square: Square::B1,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_certificate_validation_rejects_omitted_free_bridge_square() {
+        let a1 = Bitboard::from_square(Square::A1);
+        let c1 = Bitboard::from_square(Square::C1);
+        let certificate = DecompositionCertificate {
+            barrier: Bitboard::from_square(Square::H8),
+            components: vec![
+                DecompositionComponent {
+                    root: usize::from(Square::A1) as u8,
+                    mask: a1,
+                    active_mask: a1,
+                },
+                DecompositionComponent {
+                    root: usize::from(Square::C1) as u8,
+                    mask: c1,
+                    active_mask: c1,
+                },
+            ],
+            active_component_count: 2,
+            strict: true,
+            status: DecompositionStatus::Strict,
+            rejection_reason: None,
+        };
+
+        assert_eq!(
+            certificate.validate(),
+            Err(
+                DecompositionCertificateValidationError::StrictComponentMaskNotClosed {
+                    component_index: 0,
+                    square: Square::A1,
+                    omitted_square: Square::B1,
                 },
             )
         );
