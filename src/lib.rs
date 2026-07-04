@@ -518,6 +518,14 @@ pub enum ConservativeLegalIndependenceError {
         /// the current checker, because off-board pawns are treated as frozen.
         forward_square: Option<Square>,
     },
+    /// A barrier pawn has a currently legal capture, so it can move off the
+    /// certified wall and invalidate the separation.
+    BarrierPawnCanCapture {
+        /// Mobile barrier pawn.
+        square: Square,
+        /// Capturable opposing piece.
+        target: Square,
+    },
     /// A non-barrier occupied square is absent from all certified components.
     ActivePieceOutsideCertifiedComponent {
         /// Occupied non-barrier square.
@@ -1383,6 +1391,15 @@ fn verify_frozen_barrier_pawns(
                 forward_square: Some(forward_square),
             });
         }
+
+        let captures =
+            shakmaty::attacks::pawn_attacks(piece.color, square) & board.by_color(!piece.color);
+        if let Some(target) = captures.into_iter().next() {
+            return Err(ConservativeLegalIndependenceError::BarrierPawnCanCapture {
+                square,
+                target,
+            });
+        }
     }
 
     Ok(())
@@ -1932,21 +1949,40 @@ mod tests {
     }
 
     #[test]
+    fn test_conservative_legal_independence_rejects_barrier_pawn_capture() {
+        let mut board = frozen_vertical_wall_board();
+        board.set_piece_at(Square::C1, Color::White.knight());
+        board.set_piece_at(Square::H8, Color::Black.knight());
+        let certificate = frozen_vertical_wall_certificate(
+            Bitboard::from_square(Square::C1),
+            Bitboard::from_square(Square::H8),
+        );
+
+        assert_eq!(
+            verify_conservative_legal_independence(&board, &certificate),
+            Err(ConservativeLegalIndependenceError::BarrierPawnCanCapture {
+                square: Square::D2,
+                target: Square::C1,
+            },)
+        );
+    }
+
+    #[test]
     fn test_conservative_legal_independence_rejects_knight_crossing_wall() {
         let mut board = frozen_vertical_wall_board();
-        board.set_piece_at(Square::C3, Color::White.knight());
-        board.set_piece_at(Square::E4, Color::Black.knight());
+        board.set_piece_at(Square::C2, Color::White.knight());
+        board.set_piece_at(Square::H8, Color::Black.knight());
         let certificate = frozen_vertical_wall_certificate(
-            Bitboard::from_square(Square::C3),
-            Bitboard::from_square(Square::E4),
+            Bitboard::from_square(Square::C2),
+            Bitboard::from_square(Square::H8),
         );
 
         assert_eq!(
             verify_conservative_legal_independence(&board, &certificate),
             Err(
                 ConservativeLegalIndependenceError::PieceCanEnterOtherComponent {
-                    from: Square::C3,
-                    to: Square::E2,
+                    from: Square::C2,
+                    to: Square::E1,
                     from_component: 0,
                     to_component: 1,
                 },
