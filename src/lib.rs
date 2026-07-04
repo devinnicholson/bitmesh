@@ -3,7 +3,7 @@
 //! This library provides algorithms like Union-Find to decompose
 //! a chess position into independent combinatorial game components.
 
-use shakmaty::{Bitboard, Board, Color, Square};
+use shakmaty::{Bitboard, Board, Color, Piece, Role, Square};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
@@ -461,6 +461,96 @@ pub fn position_bound_decomposition_certificate_digest(
     Ok(PositionBoundDecompositionCertificateDigest(sha256(
         &payload,
     )))
+}
+
+/// Additive proof that a strict structural decomposition also passes a
+/// conservative one-ply legal-independence screen.
+///
+/// The proof is intentionally conservative: it accepts only positions whose
+/// barrier pawns are frozen by other barrier pawns and whose currently legal
+/// captures/quiet moves cannot enter another certified component or capture the
+/// barrier. It is not a full game-tree theorem, but it is the proof level
+/// downstream non-fixture composition rows should require before exact labels
+/// are promoted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConservativeLegalIndependenceProof {
+    /// Digest of the validated structural decomposition certificate.
+    pub decomposition_digest: DecompositionCertificateDigest,
+    /// Number of certified active components.
+    pub component_count: u8,
+    /// Frozen pawn barrier that separates the components.
+    pub barrier: Bitboard,
+    /// Stable proof contract identifier for downstream manifests.
+    pub proof_kind: &'static str,
+}
+
+/// Conservative legal-independence proof failures.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConservativeLegalIndependenceError {
+    /// The cited structural decomposition certificate is invalid.
+    InvalidDecompositionCertificate {
+        /// Structural validation error.
+        error: DecompositionCertificateValidationError,
+    },
+    /// Conservative legal independence requires a strict structural certificate.
+    RequiresStrictDecomposition {
+        /// Status of the structural certificate.
+        status: DecompositionStatus,
+    },
+    /// A barrier square has no piece in the supplied board.
+    BarrierSquareIsEmpty {
+        /// Empty barrier square.
+        square: Square,
+    },
+    /// A barrier square is not occupied by a pawn.
+    BarrierSquareIsNotPawn {
+        /// Invalid barrier square.
+        square: Square,
+        /// Role occupying that square.
+        role: Role,
+    },
+    /// A barrier pawn can become mobile because its forward blocker is not also
+    /// part of the certified barrier.
+    BarrierPawnNotFrozen {
+        /// Mobile barrier pawn.
+        square: Square,
+        /// Forward square that is absent from the barrier. `None` is not used by
+        /// the current checker, because off-board pawns are treated as frozen.
+        forward_square: Option<Square>,
+    },
+    /// A non-barrier occupied square is absent from all certified components.
+    ActivePieceOutsideCertifiedComponent {
+        /// Occupied non-barrier square.
+        square: Square,
+    },
+    /// A legal capture can remove a barrier piece.
+    BarrierPieceCanBeCaptured {
+        /// Attacking non-barrier piece.
+        attacker_square: Square,
+        /// Capturable barrier square.
+        barrier_square: Square,
+    },
+    /// A currently legal move can enter a different certified component.
+    PieceCanEnterOtherComponent {
+        /// Moving piece origin.
+        from: Square,
+        /// Destination in another component.
+        to: Square,
+        /// Origin component index.
+        from_component: usize,
+        /// Destination component index.
+        to_component: usize,
+    },
+    /// A currently legal move can enter a non-barrier square that is not covered
+    /// by the structural certificate.
+    PieceCanEnterUncertifiedFreeSquare {
+        /// Moving piece origin.
+        from: Square,
+        /// Uncertified destination.
+        to: Square,
+        /// Origin component index.
+        from_component: usize,
+    },
 }
 
 /// Structural validation error for a [`CompositionCertificate`].
@@ -1216,6 +1306,212 @@ pub fn certify_decomposition(board: &Board) -> DecompositionCertificate {
     }
 }
 
+/// Certifies a decomposition and then applies the conservative legal
+/// independence screen.
+pub fn certify_conservative_legal_independence(
+    board: &Board,
+) -> Result<ConservativeLegalIndependenceProof, ConservativeLegalIndependenceError> {
+    let certificate = certify_decomposition(board);
+    verify_conservative_legal_independence(board, &certificate)
+}
+
+/// Verifies that a strict structural decomposition passes a conservative
+/// one-ply legal-independence screen on the supplied board.
+pub fn verify_conservative_legal_independence(
+    board: &Board,
+    certificate: &DecompositionCertificate,
+) -> Result<ConservativeLegalIndependenceProof, ConservativeLegalIndependenceError> {
+    certificate.validate().map_err(|error| {
+        ConservativeLegalIndependenceError::InvalidDecompositionCertificate { error }
+    })?;
+
+    if certificate.status != DecompositionStatus::Strict {
+        return Err(
+            ConservativeLegalIndependenceError::RequiresStrictDecomposition {
+                status: certificate.status,
+            },
+        );
+    }
+
+    let component_by_square = component_index_by_square(certificate);
+    verify_frozen_barrier_pawns(board, certificate)?;
+    verify_active_piece_destinations(board, certificate, &component_by_square)?;
+
+    let decomposition_digest = certificate.digest().map_err(|error| {
+        ConservativeLegalIndependenceError::InvalidDecompositionCertificate { error }
+    })?;
+
+    Ok(ConservativeLegalIndependenceProof {
+        decomposition_digest,
+        component_count: certificate.active_component_count,
+        barrier: certificate.barrier,
+        proof_kind: "bitmesh:conservative_legal_independence:v0",
+    })
+}
+
+fn component_index_by_square(certificate: &DecompositionCertificate) -> [Option<usize>; 64] {
+    let mut component_by_square = [None; 64];
+    for (component_index, component) in certificate.components.iter().enumerate() {
+        for sq in component.mask {
+            component_by_square[usize::from(sq)] = Some(component_index);
+        }
+    }
+    component_by_square
+}
+
+fn verify_frozen_barrier_pawns(
+    board: &Board,
+    certificate: &DecompositionCertificate,
+) -> Result<(), ConservativeLegalIndependenceError> {
+    for square in certificate.barrier {
+        let piece = board
+            .piece_at(square)
+            .ok_or(ConservativeLegalIndependenceError::BarrierSquareIsEmpty { square })?;
+        if piece.role != Role::Pawn {
+            return Err(ConservativeLegalIndependenceError::BarrierSquareIsNotPawn {
+                square,
+                role: piece.role,
+            });
+        }
+
+        let forward_offset = if piece.color == Color::White { 8 } else { -8 };
+        if let Some(forward_square) = square.offset(forward_offset)
+            && !certificate.barrier.contains(forward_square)
+        {
+            return Err(ConservativeLegalIndependenceError::BarrierPawnNotFrozen {
+                square,
+                forward_square: Some(forward_square),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_active_piece_destinations(
+    board: &Board,
+    certificate: &DecompositionCertificate,
+    component_by_square: &[Option<usize>; 64],
+) -> Result<(), ConservativeLegalIndependenceError> {
+    let active = board.occupied() & !certificate.barrier;
+    let occupied = board.occupied();
+
+    for from in active {
+        let piece = board
+            .piece_at(from)
+            .expect("occupied non-barrier square must contain a piece");
+        let from_component = component_by_square[usize::from(from)].ok_or(
+            ConservativeLegalIndependenceError::ActivePieceOutsideCertifiedComponent {
+                square: from,
+            },
+        )?;
+
+        match piece.role {
+            Role::Pawn => {
+                let captures = shakmaty::attacks::pawn_attacks(piece.color, from)
+                    & board.by_color(!piece.color);
+                for to in captures {
+                    check_conservative_destination(
+                        certificate,
+                        component_by_square,
+                        from,
+                        from_component,
+                        to,
+                    )?;
+                }
+
+                for to in conservative_pawn_quiet_destinations(board, from, piece.color) {
+                    check_conservative_destination(
+                        certificate,
+                        component_by_square,
+                        from,
+                        from_component,
+                        to,
+                    )?;
+                }
+            }
+            role => {
+                let destinations = shakmaty::attacks::attacks(
+                    from,
+                    Piece {
+                        role,
+                        color: piece.color,
+                    },
+                    occupied,
+                ) & !board.by_color(piece.color);
+                for to in destinations {
+                    check_conservative_destination(
+                        certificate,
+                        component_by_square,
+                        from,
+                        from_component,
+                        to,
+                    )?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn conservative_pawn_quiet_destinations(board: &Board, from: Square, color: Color) -> Vec<Square> {
+    let occupied = board.occupied();
+    let forward_offset = if color == Color::White { 8 } else { -8 };
+    let mut destinations = Vec::with_capacity(2);
+
+    if let Some(one_step) = from.offset(forward_offset)
+        && !occupied.contains(one_step)
+    {
+        destinations.push(one_step);
+        if let Some(two_step) = one_step.offset(forward_offset)
+            && !occupied.contains(two_step)
+        {
+            destinations.push(two_step);
+        }
+    }
+
+    destinations
+}
+
+fn check_conservative_destination(
+    certificate: &DecompositionCertificate,
+    component_by_square: &[Option<usize>; 64],
+    from: Square,
+    from_component: usize,
+    to: Square,
+) -> Result<(), ConservativeLegalIndependenceError> {
+    if certificate.barrier.contains(to) {
+        return Err(
+            ConservativeLegalIndependenceError::BarrierPieceCanBeCaptured {
+                attacker_square: from,
+                barrier_square: to,
+            },
+        );
+    }
+
+    let to_component = component_by_square[usize::from(to)].ok_or(
+        ConservativeLegalIndependenceError::PieceCanEnterUncertifiedFreeSquare {
+            from,
+            to,
+            from_component,
+        },
+    )?;
+
+    if to_component != from_component {
+        return Err(
+            ConservativeLegalIndependenceError::PieceCanEnterOtherComponent {
+                from,
+                to,
+                from_component,
+                to_component,
+            },
+        );
+    }
+
+    Ok(())
+}
+
 /// Finds active topological subsystems separated by locked-pawn barriers.
 #[must_use]
 pub fn find_subsystems(board: &Board) -> (bool, u8) {
@@ -1270,6 +1566,87 @@ mod tests {
         board.set_piece_at(Square::A1, Color::White.knight());
         board.set_piece_at(Square::H8, Color::Black.knight());
         board
+    }
+
+    fn d_file_barrier_squares() -> [Square; 8] {
+        [
+            Square::D1,
+            Square::D2,
+            Square::D3,
+            Square::D4,
+            Square::D5,
+            Square::D6,
+            Square::D7,
+            Square::D8,
+        ]
+    }
+
+    fn d_file_frozen_barrier() -> Bitboard {
+        let mut barrier = Bitboard::EMPTY;
+        for sq in d_file_barrier_squares() {
+            barrier.add(sq);
+        }
+        barrier
+    }
+
+    fn frozen_vertical_wall_board() -> Board {
+        let mut board = Board::empty();
+        for (index, sq) in d_file_barrier_squares().into_iter().enumerate() {
+            let color = if index % 2 == 0 {
+                Color::White
+            } else {
+                Color::Black
+            };
+            board.set_piece_at(sq, color.pawn());
+        }
+        board
+    }
+
+    fn left_of_d_file_mask() -> Bitboard {
+        let barrier = d_file_frozen_barrier();
+        let mut mask = Bitboard::EMPTY;
+        for sq in !barrier {
+            if usize::from(sq) % 8 < 3 {
+                mask.add(sq);
+            }
+        }
+        mask
+    }
+
+    fn right_of_d_file_mask() -> Bitboard {
+        let barrier = d_file_frozen_barrier();
+        let mut mask = Bitboard::EMPTY;
+        for sq in !barrier {
+            if usize::from(sq) % 8 > 3 {
+                mask.add(sq);
+            }
+        }
+        mask
+    }
+
+    fn frozen_vertical_wall_certificate(
+        left_active: Bitboard,
+        right_active: Bitboard,
+    ) -> DecompositionCertificate {
+        DecompositionCertificate {
+            barrier: d_file_frozen_barrier(),
+            components: vec![
+                DecompositionComponent {
+                    root: usize::from(Square::A1) as u8,
+                    mask: left_of_d_file_mask(),
+                    active_mask: left_active,
+                },
+                DecompositionComponent {
+                    root: usize::from(Square::E1) as u8,
+                    mask: right_of_d_file_mask(),
+                    active_mask: right_active,
+                },
+            ],
+            active_component_count: 2,
+            strict: true,
+            status: DecompositionStatus::Strict,
+            rejection_reason: None,
+        }
     }
 
     #[test]
@@ -1513,6 +1890,68 @@ mod tests {
         );
         assert_eq!(digest.as_bytes().len(), 32);
         assert_eq!(digest.to_string(), digest.to_hex());
+    }
+
+    #[test]
+    fn test_conservative_legal_independence_accepts_frozen_vertical_wall() {
+        let mut board = frozen_vertical_wall_board();
+        board.set_piece_at(Square::A1, Color::White.knight());
+        board.set_piece_at(Square::H8, Color::Black.knight());
+        let certificate = frozen_vertical_wall_certificate(
+            Bitboard::from_square(Square::A1),
+            Bitboard::from_square(Square::H8),
+        );
+
+        let proof = verify_conservative_legal_independence(&board, &certificate).unwrap();
+
+        assert_eq!(proof.component_count, 2);
+        assert_eq!(proof.barrier, d_file_frozen_barrier());
+        assert_eq!(
+            proof.proof_kind,
+            "bitmesh:conservative_legal_independence:v0"
+        );
+        assert_eq!(
+            proof.decomposition_digest,
+            certificate.digest().expect("test certificate is valid"),
+        );
+    }
+
+    #[test]
+    fn test_conservative_legal_independence_rejects_mobile_blocker_wall() {
+        let board = locked_horizontal_chain_board();
+        let certificate = certify_decomposition(&board);
+        assert_eq!(certificate.status, DecompositionStatus::Strict);
+
+        assert_eq!(
+            verify_conservative_legal_independence(&board, &certificate),
+            Err(ConservativeLegalIndependenceError::BarrierPawnNotFrozen {
+                square: Square::A4,
+                forward_square: Some(Square::A5),
+            },)
+        );
+    }
+
+    #[test]
+    fn test_conservative_legal_independence_rejects_knight_crossing_wall() {
+        let mut board = frozen_vertical_wall_board();
+        board.set_piece_at(Square::C3, Color::White.knight());
+        board.set_piece_at(Square::E4, Color::Black.knight());
+        let certificate = frozen_vertical_wall_certificate(
+            Bitboard::from_square(Square::C3),
+            Bitboard::from_square(Square::E4),
+        );
+
+        assert_eq!(
+            verify_conservative_legal_independence(&board, &certificate),
+            Err(
+                ConservativeLegalIndependenceError::PieceCanEnterOtherComponent {
+                    from: Square::C3,
+                    to: Square::E2,
+                    from_component: 0,
+                    to_component: 1,
+                },
+            )
+        );
     }
 
     #[test]
