@@ -1,7 +1,14 @@
-//! `BitMesh`: Fast Graph Theory on Chess Bitboards
+//! Conservative structural decomposition certificates for chess bitboards.
 //!
-//! This library provides algorithms like Union-Find to decompose
-//! a chess position into independent combinatorial game components.
+//! Bitmesh identifies connected regions separated by selected locked-pawn
+//! barriers and can apply a conservative, one-ply movement screen to those
+//! regions. An accepted screen is evidence about the supplied board only. It
+//! does not prove that the regions remain independent throughout the future
+//! legal game tree, that the position is a combinatorial-game sum, or that any
+//! component value is correct.
+//!
+//! See the repository README for the complete guarantee, non-claims, failure
+//! modes, serialization policy, and an executable FEN example.
 
 use shakmaty::{Bitboard, Board, Color, Piece, Role, Square};
 use std::{
@@ -130,8 +137,10 @@ impl UnionFind {
 
 /// Detects topological components of a chessboard given a `barrier` of occupied squares.
 ///
-/// Uses bulletproof bitwise logic to compute 8-way adjacency between non-barrier squares,
-/// returning a `UnionFind` structure representing the connected components.
+/// Computes 8-way adjacency between non-barrier squares and returns a
+/// [`UnionFind`] structure representing the connected components. Barrier
+/// selection and semantic validity are the caller's responsibility; this
+/// function performs only graph partitioning.
 #[must_use]
 pub fn partition_board(barrier: Bitboard) -> UnionFind {
     let free = !barrier;
@@ -165,7 +174,10 @@ pub fn partition_board(barrier: Bitboard) -> UnionFind {
     uf
 }
 
-/// Identifies pawns that are blocked and have no immediate legal capture target.
+/// Identifies pawns that are blocked and have no immediate capture target.
+///
+/// This board-only predicate considers both colors. It does not account for
+/// side to move, check, pins, en passant, castling rights, or move counters.
 #[must_use]
 pub fn get_locked_pawns(board: &Board) -> Bitboard {
     let occupied = board.occupied();
@@ -1260,7 +1272,12 @@ fn adjacent_square(sq: Square, file_delta: i32, rank_delta: i32) -> Option<Squar
     Some(Square::from_coords(file, rank))
 }
 
-/// Builds a decomposition certificate using locked-pawn barriers and the board partition.
+/// Builds a structural decomposition certificate using locked-pawn barriers.
+///
+/// A strict result proves only that the detected barrier separates occupied
+/// non-barrier squares into at least two 8-connected regions on this board.
+/// Call [`verify_conservative_legal_independence`] for the stronger—but still
+/// one-ply and board-local—screen.
 #[must_use]
 pub fn certify_decomposition(board: &Board) -> DecompositionCertificate {
     let barrier = get_locked_pawns(board);
@@ -1314,8 +1331,11 @@ pub fn certify_decomposition(board: &Board) -> DecompositionCertificate {
     }
 }
 
-/// Certifies a decomposition and then applies the conservative legal
-/// independence screen.
+/// Certifies a decomposition and applies the conservative one-ply screen.
+///
+/// The screen deliberately over-approximates some movement (for example pawn
+/// double advances) so that it can reject uncertain positions. Acceptance is
+/// not a theorem about future descendants in the legal game tree.
 pub fn certify_conservative_legal_independence(
     board: &Board,
 ) -> Result<ConservativeLegalIndependenceProof, ConservativeLegalIndependenceError> {
@@ -1324,7 +1344,13 @@ pub fn certify_conservative_legal_independence(
 }
 
 /// Verifies that a strict structural decomposition passes a conservative
-/// one-ply legal-independence screen on the supplied board.
+/// one-ply movement screen on the supplied board.
+///
+/// The checker examines both colors and geometric move/capture destinations;
+/// it does not consume side-to-move, check, castling, or en-passant metadata.
+/// It can therefore reject a position that legal move generation would accept.
+/// Success is a board-local certificate, not a proof of future game-tree
+/// independence.
 pub fn verify_conservative_legal_independence(
     board: &Board,
     certificate: &DecompositionCertificate,
@@ -1529,7 +1555,10 @@ fn check_conservative_destination(
     Ok(())
 }
 
-/// Finds active topological subsystems separated by locked-pawn barriers.
+/// Finds active structural regions separated by locked-pawn barriers.
+///
+/// The boolean reports whether more than one region contains non-barrier
+/// material. It does not report full legal or game-tree independence.
 #[must_use]
 pub fn find_subsystems(board: &Board) -> (bool, u8) {
     let barrier = get_locked_pawns(board);
@@ -1664,6 +1693,13 @@ mod tests {
             status: DecompositionStatus::Strict,
             rejection_reason: None,
         }
+    }
+
+    fn readme_fen_position() -> Chess {
+        Fen::from_str("7k/8/8/p1p1p1p1/PpPpPpPp/1P1P1P1P/8/K7 w - - 0 1")
+            .unwrap()
+            .into_position(CastlingMode::Standard)
+            .unwrap()
     }
 
     #[test]
@@ -1871,6 +1907,11 @@ mod tests {
         assert_eq!(digest, certificate.digest().unwrap());
         assert_eq!(digest.as_bytes().len(), 32);
         assert_eq!(digest.to_string(), digest.to_hex());
+        assert_eq!(&payload[..9], b"BMDCERT\0\x01");
+        assert_eq!(
+            digest.to_hex(),
+            "cf721c7f1fb6fdf02de27735da2a9af56a55518f5c062d9653f41be0f447576e"
+        );
     }
 
     #[test]
@@ -1930,6 +1971,67 @@ mod tests {
         assert_eq!(
             proof.decomposition_digest,
             certificate.digest().expect("test certificate is valid"),
+        );
+    }
+
+    #[test]
+    fn test_readme_fen_certification_is_deterministic() {
+        let position = readme_fen_position();
+        let certificate = certify_decomposition(position.board());
+
+        assert_eq!(certificate.status, DecompositionStatus::Strict);
+        assert_eq!(certificate.active_component_count, 2);
+        assert_eq!(certificate.barrier.count(), 16);
+        assert_eq!(
+            certificate.digest().unwrap().to_hex(),
+            "7e300b3e0b7901942161a58eb284b87134be7f26484561f2bbc142d1010465bf"
+        );
+
+        let first = verify_conservative_legal_independence(position.board(), &certificate).unwrap();
+        let second =
+            verify_conservative_legal_independence(position.board(), &certificate).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.component_count, 2);
+        assert_eq!(
+            first.proof_kind,
+            "bitmesh:conservative_legal_independence:v0"
+        );
+    }
+
+    #[test]
+    fn test_conservative_legal_independence_rejects_missing_barrier_square() {
+        let mut board = frozen_vertical_wall_board();
+        board.set_piece_at(Square::A1, Color::White.knight());
+        board.set_piece_at(Square::H8, Color::Black.knight());
+        let certificate = frozen_vertical_wall_certificate(
+            Bitboard::from_square(Square::A1),
+            Bitboard::from_square(Square::H8),
+        );
+        board.discard_piece_at(Square::D4);
+
+        assert_eq!(
+            verify_conservative_legal_independence(&board, &certificate),
+            Err(ConservativeLegalIndependenceError::BarrierSquareIsEmpty { square: Square::D4 })
+        );
+    }
+
+    #[test]
+    fn test_conservative_legal_independence_rejects_non_pawn_barrier_square() {
+        let mut board = frozen_vertical_wall_board();
+        board.set_piece_at(Square::A1, Color::White.knight());
+        board.set_piece_at(Square::H8, Color::Black.knight());
+        let certificate = frozen_vertical_wall_certificate(
+            Bitboard::from_square(Square::A1),
+            Bitboard::from_square(Square::H8),
+        );
+        board.set_piece_at(Square::D4, Color::Black.knight());
+
+        assert_eq!(
+            verify_conservative_legal_independence(&board, &certificate),
+            Err(ConservativeLegalIndependenceError::BarrierSquareIsNotPawn {
+                square: Square::D4,
+                role: Role::Knight,
+            })
         );
     }
 
@@ -2105,6 +2207,11 @@ mod tests {
         assert_eq!(digest, certificate.digest().unwrap());
         assert_eq!(digest.as_bytes().len(), 32);
         assert_eq!(digest.to_string(), digest.to_hex());
+        assert_eq!(&payload[..11], b"BMCOMPOSE\0\x01");
+        assert_eq!(
+            digest.to_hex(),
+            "5fefeec7de17e312bae7661f6745b74fc1001d49ad447c0d6a1985ff70f7b525"
+        );
     }
 
     #[test]

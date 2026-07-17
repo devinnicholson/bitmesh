@@ -2,6 +2,15 @@
 name = "bitmesh"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+authors = ["Devin Nicholson"]
+description = "Conservative structural decomposition certificates for chess bitboards"
+repository = "https://github.com/devinnicholson/bitmesh"
+homepage = "https://github.com/devinnicholson/bitmesh"
+documentation = "https://docs.rs/bitmesh"
+readme = "README.md"
+keywords = ["chess", "bitboard", "graph", "cgt", "research"]
+categories = ["algorithms", "game-development", "mathematics"]
 
 [dependencies]
 shakmaty = "0.27"

@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use Bitmesh in research, please cite this software."
+type: software
+title: "Bitmesh: Conservative structural decomposition certificates for chess bitboards"
+version: 0.1.0
+authors:
+  - family-names: Nicholson
+    given-names: Devin
+repository-code: "https://github.com/devinnicholson/bitmesh"
+url: "https://github.com/devinnicholson/bitmesh"
