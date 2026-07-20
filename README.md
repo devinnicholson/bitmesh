@@ -17,8 +17,9 @@ legal game tree. It does not establish a combinatorial-game sum, calculate a
 chess or CGT value, or prove that the input position is reachable.
 
 Bitmesh is pre-1.0 research software. No formal package release has been
-published yet. The repository owner's license decision is still pending; the
-public source does not by itself grant reuse rights.
+published yet. It is licensed [GPL-3.0-or-later](LICENSE), matching its
+direct dependency on [Shakmaty](https://github.com/niklasf/shakmaty)
+(GPL-3.0).
 
 ## Executable FEN example
 

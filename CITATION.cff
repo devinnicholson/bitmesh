@@ -3,6 +3,7 @@ message: "If you use Bitmesh in research, please cite this software."
 type: software
 title: "Bitmesh: Conservative structural decomposition certificates for chess bitboards"
 version: 0.1.0
+license: GPL-3.0-or-later
 authors:
   - family-names: Nicholson
     given-names: Devin

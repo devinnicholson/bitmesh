@@ -22,3 +22,5 @@ No formal release has been published yet.
 - Scoped decomposition claims to conservative board-local structural and
   one-ply evidence, rather than future game-tree independence.
 - Added package metadata and a Rust 1.85 minimum supported version.
+- Licensed the crate GPL-3.0-or-later, matching its direct Shakmaty (GPL-3.0)
+  dependency.
