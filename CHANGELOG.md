@@ -24,3 +24,6 @@ No formal release has been published yet.
 - Added package metadata and a Rust 1.85 minimum supported version.
 - Licensed the crate GPL-3.0-or-later, matching its direct Shakmaty (GPL-3.0)
   dependency.
+- Raised the minimum supported Rust version to 1.88: the crate already used
+  let-chains (stabilized in 1.88), so the declared 1.85 floor did not actually
+  compile and CI's own MSRV job was failing.

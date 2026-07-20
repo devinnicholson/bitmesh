@@ -2,7 +2,7 @@
 name = "bitmesh"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Devin Nicholson"]
 description = "Conservative structural decomposition certificates for chess bitboards"
 license = "GPL-3.0-or-later"
