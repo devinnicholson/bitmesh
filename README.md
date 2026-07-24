@@ -173,7 +173,8 @@ No latency or throughput claim is made without a versioned benchmark.
 
 ## Development
 
-The minimum supported Rust version is 1.85 because the crate uses Rust 2024.
+The minimum supported Rust version is 1.88, matching the crate's let-chain
+usage and CI floor.
 Run the same checks as CI with:
 
 ```console
