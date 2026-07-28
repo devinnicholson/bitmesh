@@ -2,12 +2,11 @@
 //!
 //! Bitmesh identifies connected regions separated by selected locked-pawn
 //! barriers and can apply a conservative, one-ply movement screen to those
-//! regions. An accepted screen is evidence about the supplied board only. It
-//! does not prove that the regions remain independent throughout the future
-//! legal game tree, that the position is a combinatorial-game sum, or that any
-//! component value is correct.
+//! regions. An accepted screen is evidence about the supplied board only. Its
+//! scope ends before future descendants, combinatorial-game sums, and component
+//! values.
 //!
-//! See the repository README for the complete guarantee, non-claims, failure
+//! See the repository README for the complete guarantee, boundaries, failure
 //! modes, serialization policy, and an executable FEN example.
 
 use shakmaty::{Bitboard, Board, Color, Piece, Role, Square};
@@ -176,8 +175,8 @@ pub fn partition_board(barrier: Bitboard) -> UnionFind {
 
 /// Identifies pawns that are blocked and have no immediate capture target.
 ///
-/// This board-only predicate considers both colors. It does not account for
-/// side to move, check, pins, en passant, castling rights, or move counters.
+/// This board-only predicate considers both colors. Its inputs omit side to
+/// move, check, pins, en passant, castling rights, and move counters.
 #[must_use]
 pub fn get_locked_pawns(board: &Board) -> Bitboard {
     let occupied = board.occupied();
@@ -457,13 +456,30 @@ impl fmt::Display for PositionBoundDecompositionCertificateDigest {
 ///
 /// This is an additive helper for provenance labels that need to bind the
 /// structural certificate to a concrete position string without changing the
-/// existing structural certificate payload.
+/// existing structural certificate payload. `BMDPOSCERT` v1 accepts at most
+/// 65,535 UTF-8 bytes in each caller-supplied text field.
 pub fn position_bound_decomposition_certificate_digest(
     certificate: &DecompositionCertificate,
     canonical_position: &str,
     context: &str,
 ) -> Result<PositionBoundDecompositionCertificateDigest, DecompositionCertificateValidationError> {
     let certificate_digest = certificate.digest()?;
+    if canonical_position.len() > MAX_CERTIFICATE_TEXT_BYTES {
+        return Err(
+            DecompositionCertificateValidationError::PositionContextTooLong {
+                actual: canonical_position.len(),
+                maximum: MAX_CERTIFICATE_TEXT_BYTES,
+            },
+        );
+    }
+    if context.len() > MAX_CERTIFICATE_TEXT_BYTES {
+        return Err(
+            DecompositionCertificateValidationError::PositionContextNamespaceTooLong {
+                actual: context.len(),
+                maximum: MAX_CERTIFICATE_TEXT_BYTES,
+            },
+        );
+    }
     let mut payload = Vec::new();
     payload.extend_from_slice(b"BMDPOSCERT\0");
     payload.push(1);
@@ -478,12 +494,10 @@ pub fn position_bound_decomposition_certificate_digest(
 /// Additive proof that a strict structural decomposition also passes a
 /// conservative one-ply legal-independence screen.
 ///
-/// The proof is intentionally conservative: it accepts only positions whose
-/// barrier pawns are frozen by other barrier pawns and whose currently legal
-/// captures/quiet moves cannot enter another certified component or capture the
-/// barrier. It is not a full game-tree theorem, but it is the proof level
-/// downstream non-fixture composition rows should require before exact labels
-/// are promoted.
+/// The proof is intentionally conservative: it accepts only supplied boards
+/// whose barrier pawns are frozen by other barrier pawns and whose generated
+/// geometric destinations stay inside their certified component and preserve
+/// the barrier. The proof contract ends after this board-local screen.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConservativeLegalIndependenceProof {
     /// Digest of the validated structural decomposition certificate.
@@ -530,8 +544,8 @@ pub enum ConservativeLegalIndependenceError {
         /// the current checker, because off-board pawns are treated as frozen.
         forward_square: Option<Square>,
     },
-    /// A barrier pawn has a currently legal capture, so it can move off the
-    /// certified wall and invalidate the separation.
+    /// A barrier pawn has an immediate geometric capture, so the screen cannot
+    /// certify the wall as frozen.
     BarrierPawnCanCapture {
         /// Mobile barrier pawn.
         square: Square,
@@ -543,14 +557,22 @@ pub enum ConservativeLegalIndependenceError {
         /// Occupied non-barrier square.
         square: Square,
     },
-    /// A legal capture can remove a barrier piece.
+    /// The certificate's active masks differ from the occupied non-barrier
+    /// squares on the supplied board.
+    ActiveMaskDoesNotMatchBoard {
+        /// Union of active masks stored in the certificate.
+        certificate_active: Bitboard,
+        /// Occupied non-barrier squares on the supplied board.
+        board_active: Bitboard,
+    },
+    /// A generated geometric capture can remove a barrier piece.
     BarrierPieceCanBeCaptured {
         /// Attacking non-barrier piece.
         attacker_square: Square,
         /// Capturable barrier square.
         barrier_square: Square,
     },
-    /// A currently legal move can enter a different certified component.
+    /// A generated geometric destination lies in a different component.
     PieceCanEnterOtherComponent {
         /// Moving piece origin.
         from: Square,
@@ -561,8 +583,8 @@ pub enum ConservativeLegalIndependenceError {
         /// Destination component index.
         to_component: usize,
     },
-    /// A currently legal move can enter a non-barrier square that is not covered
-    /// by the structural certificate.
+    /// A generated geometric destination is a non-barrier square outside the
+    /// structural certificate.
     PieceCanEnterUncertifiedFreeSquare {
         /// Moving piece origin.
         from: Square,
@@ -600,6 +622,15 @@ pub enum CompositionCertificateValidationError {
         /// Component root with the empty value digest.
         component_root: u8,
     },
+    /// A component value digest exceeds the `BMCOMPOSE` v1 length field.
+    ComponentValueDigestTooLong {
+        /// Component root with the oversized value digest.
+        component_root: u8,
+        /// UTF-8 byte length supplied by the caller.
+        actual: usize,
+        /// Largest UTF-8 byte length accepted by v1.
+        maximum: usize,
+    },
     /// A strict decomposition component is missing from the composition.
     MissingComponentRoot {
         /// Missing root square index.
@@ -617,10 +648,20 @@ pub enum CompositionCertificateValidationError {
     },
     /// The composed result exact value digest is empty.
     EmptyResultValueDigest,
+    /// The result value digest exceeds the `BMCOMPOSE` v1 length field.
+    ResultValueDigestTooLong {
+        /// UTF-8 byte length supplied by the caller.
+        actual: usize,
+        /// Largest UTF-8 byte length accepted by v1.
+        maximum: usize,
+    },
 }
 
 impl CompositionCertificate {
     /// Returns a versioned canonical byte payload for stable provenance labels.
+    ///
+    /// `BMCOMPOSE` v1 accepts at most 65,535 UTF-8 bytes in each value-digest
+    /// field.
     pub fn canonical_payload(&self) -> Result<Vec<u8>, CompositionCertificateValidationError> {
         self.validate()?;
         Ok(self.canonical_payload_unchecked())
@@ -643,6 +684,14 @@ impl CompositionCertificate {
         if self.result_value_digest.is_empty() {
             return Err(CompositionCertificateValidationError::EmptyResultValueDigest);
         }
+        if self.result_value_digest.len() > MAX_CERTIFICATE_TEXT_BYTES {
+            return Err(
+                CompositionCertificateValidationError::ResultValueDigestTooLong {
+                    actual: self.result_value_digest.len(),
+                    maximum: MAX_CERTIFICATE_TEXT_BYTES,
+                },
+            );
+        }
 
         let mut roots = HashSet::new();
         for component in &self.component_values {
@@ -650,6 +699,15 @@ impl CompositionCertificate {
                 return Err(
                     CompositionCertificateValidationError::EmptyComponentValueDigest {
                         component_root: component.component_root,
+                    },
+                );
+            }
+            if component.value_digest.len() > MAX_CERTIFICATE_TEXT_BYTES {
+                return Err(
+                    CompositionCertificateValidationError::ComponentValueDigestTooLong {
+                        component_root: component.component_root,
+                        actual: component.value_digest.len(),
+                        maximum: MAX_CERTIFICATE_TEXT_BYTES,
                     },
                 );
             }
@@ -863,15 +921,29 @@ pub enum DecompositionCertificateValidationError {
         /// Adjacent non-barrier square omitted from all component masks.
         omitted_square: Square,
     },
+    /// Canonical position text exceeds the `BMDPOSCERT` v1 length field.
+    PositionContextTooLong {
+        /// UTF-8 byte length supplied by the caller.
+        actual: usize,
+        /// Largest UTF-8 byte length accepted by v1.
+        maximum: usize,
+    },
+    /// Position-context namespace text exceeds the `BMDPOSCERT` v1 length
+    /// field.
+    PositionContextNamespaceTooLong {
+        /// UTF-8 byte length supplied by the caller.
+        actual: usize,
+        /// Largest UTF-8 byte length accepted by v1.
+        maximum: usize,
+    },
 }
 
 impl DecompositionCertificate {
     /// Returns a versioned canonical byte payload for stable provenance labels.
     ///
-    /// Components are serialized in sorted order, so equivalent certificates do
-    /// not depend on the caller's component vector order. Validation is run
-    /// before serialization. The resulting payload is a structural certificate,
-    /// not a proof of full legal-chess dynamic independence.
+    /// Components are serialized in sorted order, making the payload independent
+    /// of the caller's component vector order. Validation runs before
+    /// serialization. The payload records a board-graph certificate.
     pub fn canonical_payload(&self) -> Result<Vec<u8>, DecompositionCertificateValidationError> {
         self.validate()?;
         Ok(self.canonical_payload_unchecked())
@@ -892,8 +964,8 @@ impl DecompositionCertificate {
     /// Validates bounded structural invariants for this certificate.
     ///
     /// This checks mask/status consistency and audits 8-way adjacency between
-    /// certified component masks. It does not prove full legal-chess dynamic
-    /// independence.
+    /// certified component masks. The validated claim is limited to that
+    /// board-graph structure.
     pub fn validate(&self) -> Result<(), DecompositionCertificateValidationError> {
         let expected_strict = self.status == DecompositionStatus::Strict;
         if self.strict != expected_strict {
@@ -1161,6 +1233,8 @@ fn decomposition_rejection_reason_tag(reason: Option<DecompositionRejectionReaso
     }
 }
 
+const MAX_CERTIFICATE_TEXT_BYTES: usize = u16::MAX as usize;
+
 fn push_len_prefixed_bytes(payload: &mut Vec<u8>, bytes: &[u8]) {
     let length = u16::try_from(bytes.len()).expect("certificate field is too large");
     payload.extend_from_slice(&length.to_le_bytes());
@@ -1334,8 +1408,8 @@ pub fn certify_decomposition(board: &Board) -> DecompositionCertificate {
 /// Certifies a decomposition and applies the conservative one-ply screen.
 ///
 /// The screen deliberately over-approximates some movement (for example pawn
-/// double advances) so that it can reject uncertain positions. Acceptance is
-/// not a theorem about future descendants in the legal game tree.
+/// double advances), which can reject uncertain positions. Acceptance covers
+/// the supplied board and generated destinations.
 pub fn certify_conservative_legal_independence(
     board: &Board,
 ) -> Result<ConservativeLegalIndependenceProof, ConservativeLegalIndependenceError> {
@@ -1347,10 +1421,9 @@ pub fn certify_conservative_legal_independence(
 /// one-ply movement screen on the supplied board.
 ///
 /// The checker examines both colors and geometric move/capture destinations;
-/// it does not consume side-to-move, check, castling, or en-passant metadata.
-/// It can therefore reject a position that legal move generation would accept.
-/// Success is a board-local certificate, not a proof of future game-tree
-/// independence.
+/// its input omits side-to-move, check, castling, and en-passant metadata. It
+/// can therefore reject a position that legal move generation would accept.
+/// Success is a board-local certificate.
 pub fn verify_conservative_legal_independence(
     board: &Board,
     certificate: &DecompositionCertificate,
@@ -1369,6 +1442,7 @@ pub fn verify_conservative_legal_independence(
 
     let component_by_square = component_index_by_square(certificate);
     verify_frozen_barrier_pawns(board, certificate)?;
+    verify_active_masks_match_board(board, certificate)?;
     verify_active_piece_destinations(board, certificate, &component_by_square)?;
 
     let decomposition_digest = certificate.digest().map_err(|error| {
@@ -1391,6 +1465,30 @@ fn component_index_by_square(certificate: &DecompositionCertificate) -> [Option<
         }
     }
     component_by_square
+}
+
+fn verify_active_masks_match_board(
+    board: &Board,
+    certificate: &DecompositionCertificate,
+) -> Result<(), ConservativeLegalIndependenceError> {
+    let certificate_active = certificate
+        .components
+        .iter()
+        .fold(Bitboard::EMPTY, |active, component| {
+            active | component.active_mask
+        });
+    let board_active = board.occupied() & !certificate.barrier;
+
+    if certificate_active != board_active {
+        return Err(
+            ConservativeLegalIndependenceError::ActiveMaskDoesNotMatchBoard {
+                certificate_active,
+                board_active,
+            },
+        );
+    }
+
+    Ok(())
 }
 
 fn verify_frozen_barrier_pawns(
@@ -1558,7 +1656,7 @@ fn check_conservative_destination(
 /// Finds active structural regions separated by locked-pawn barriers.
 ///
 /// The boolean reports whether more than one region contains non-barrier
-/// material. It does not report full legal or game-tree independence.
+/// material. The result describes board-graph connectivity.
 #[must_use]
 pub fn find_subsystems(board: &Board) -> (bool, u8) {
     let barrier = get_locked_pawns(board);
@@ -1951,6 +2049,39 @@ mod tests {
     }
 
     #[test]
+    fn test_position_bound_digest_rejects_oversized_text_fields() {
+        let certificate = certify_decomposition(&locked_horizontal_chain_board());
+        let oversized = "x".repeat(MAX_CERTIFICATE_TEXT_BYTES + 1);
+
+        assert_eq!(
+            position_bound_decomposition_certificate_digest(
+                &certificate,
+                &oversized,
+                "bitmesh:test-fen",
+            ),
+            Err(
+                DecompositionCertificateValidationError::PositionContextTooLong {
+                    actual: MAX_CERTIFICATE_TEXT_BYTES + 1,
+                    maximum: MAX_CERTIFICATE_TEXT_BYTES,
+                }
+            )
+        );
+        assert_eq!(
+            position_bound_decomposition_certificate_digest(
+                &certificate,
+                "8/8/8/PPPPPPPP/PPPPPPPP/8/8/N6n w - - 0 1",
+                &oversized,
+            ),
+            Err(
+                DecompositionCertificateValidationError::PositionContextNamespaceTooLong {
+                    actual: MAX_CERTIFICATE_TEXT_BYTES + 1,
+                    maximum: MAX_CERTIFICATE_TEXT_BYTES,
+                }
+            )
+        );
+    }
+
+    #[test]
     fn test_conservative_legal_independence_accepts_frozen_vertical_wall() {
         let mut board = frozen_vertical_wall_board();
         board.set_piece_at(Square::A1, Color::White.knight());
@@ -1971,6 +2102,30 @@ mod tests {
         assert_eq!(
             proof.decomposition_digest,
             certificate.digest().expect("test certificate is valid"),
+        );
+    }
+
+    #[test]
+    fn test_conservative_legal_independence_rejects_stale_active_masks() {
+        let mut board = frozen_vertical_wall_board();
+        board.set_piece_at(Square::A1, Color::White.knight());
+        board.set_piece_at(Square::H8, Color::Black.knight());
+        let mut certificate = frozen_vertical_wall_certificate(
+            Bitboard::from_square(Square::A1),
+            Bitboard::from_square(Square::H8),
+        );
+        certificate.components[0].active_mask = Bitboard::from_square(Square::B1);
+
+        assert_eq!(
+            verify_conservative_legal_independence(&board, &certificate),
+            Err(
+                ConservativeLegalIndependenceError::ActiveMaskDoesNotMatchBoard {
+                    certificate_active: Bitboard::from_square(Square::B1)
+                        | Bitboard::from_square(Square::H8),
+                    board_active: Bitboard::from_square(Square::A1)
+                        | Bitboard::from_square(Square::H8),
+                }
+            )
         );
     }
 
@@ -2253,6 +2408,37 @@ mod tests {
             certificate.digest(),
             Err(
                 CompositionCertificateValidationError::EmptyComponentValueDigest { component_root },
+            )
+        );
+    }
+
+    #[test]
+    fn test_composition_certificate_rejects_oversized_value_digests() {
+        let oversized = "x".repeat(MAX_CERTIFICATE_TEXT_BYTES + 1);
+        let mut component_certificate = sample_composition_certificate();
+        let component_root = component_certificate.component_values[0].component_root;
+        component_certificate.component_values[0].value_digest = oversized.clone();
+
+        assert_eq!(
+            component_certificate.canonical_payload(),
+            Err(
+                CompositionCertificateValidationError::ComponentValueDigestTooLong {
+                    component_root,
+                    actual: MAX_CERTIFICATE_TEXT_BYTES + 1,
+                    maximum: MAX_CERTIFICATE_TEXT_BYTES,
+                }
+            )
+        );
+
+        let mut result_certificate = sample_composition_certificate();
+        result_certificate.result_value_digest = oversized;
+        assert_eq!(
+            result_certificate.canonical_payload(),
+            Err(
+                CompositionCertificateValidationError::ResultValueDigestTooLong {
+                    actual: MAX_CERTIFICATE_TEXT_BYTES + 1,
+                    maximum: MAX_CERTIFICATE_TEXT_BYTES,
+                }
             )
         );
     }

@@ -4,6 +4,17 @@ type: software
 title: "Bitmesh: Conservative structural decomposition certificates for chess bitboards"
 version: 0.1.0
 license: GPL-3.0-or-later
+abstract: >-
+  Bitmesh produces deterministic board-graph decomposition certificates for
+  chess bitboards separated by selected locked-pawn barriers. It validates
+  versioned structural and composition provenance payloads and offers a
+  conservative board-local one-ply movement screen.
+keywords:
+  - chess
+  - bitboards
+  - graph decomposition
+  - combinatorial game theory
+  - research software
 authors:
   - family-names: Nicholson
     given-names: Devin

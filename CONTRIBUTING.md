@@ -8,8 +8,8 @@ Before proposing a change:
 1. Describe the supported board domain and the claim being changed.
 2. Add a positive case, a nearby negative control, and an adversarial case when
    algorithm behavior changes.
-3. Do not derive expected research values solely from Bitmesh itself; cite a
-   hand derivation or independent oracle where the claim requires one.
+3. Ground expected research values in a cited hand derivation or independent
+   oracle where the claim requires one.
 4. Update the README and changelog whenever a public guarantee, limitation, API,
    proof kind, or payload changes.
 
@@ -19,21 +19,24 @@ Run the complete local gate:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
-cargo rustdoc --lib -- -D missing-docs
+cargo rustdoc --all-features --lib -- -D warnings -D missing-docs
+cargo run --locked --example certify_fen -- \
+  '7k/8/8/p1p1p1p1/PpPpPpPp/1P1P1P1P/8/K7 w - - 0 1'
+cargo package --locked
 ```
 
 ## Certificate compatibility
 
-`BMDCERT` v1 and `BMCOMPOSE` v1 are externally consumable byte contracts. Do not
-update their golden payloads or digests merely to make a failing test pass.
-Classify any proposed difference first:
+`BMDCERT` v1 and `BMCOMPOSE` v1 are externally consumable byte contracts.
+Classify every proposed golden-payload or digest difference before editing a
+fixture:
 
 - An unintended difference is a regression and must be fixed.
 - A compatible extension must leave existing v1 payloads unchanged.
 - An intentional incompatible format needs a new version or magic, migration
   notes, new fixtures, and explicit maintainer review.
 
-Component ordering must not change canonical payloads. New tests should avoid
+Preserve canonical payloads across component orderings. New tests should avoid
 hash-map iteration order, wall-clock time, randomness without a recorded seed,
 network access, and developer-local paths.
 
@@ -47,5 +50,5 @@ Keep changes focused and include:
 - compatibility impact on APIs, proof kinds, payloads, and digests; and
 - known false-positive/false-negative risks.
 
-Do not publish a package, create a release, or regenerate version tags as part
-of an ordinary contribution.
+Package publication, releases, and version tags belong to the maintainer release
+process.

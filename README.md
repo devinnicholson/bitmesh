@@ -8,18 +8,27 @@ applies a one-ply movement screen.
 The central guarantee is deliberately narrow:
 
 > An accepted `ConservativeLegalIndependenceProof` says that, on the supplied
-> board, the validated barrier is frozen and the checker found no geometric
-> one-ply move or capture that crosses a certified region or removes the
-> barrier.
+> board, the certificate's active masks match the occupied non-barrier squares,
+> the validated barrier is frozen, and every generated geometric one-ply
+> destination stays inside its certified region while preserving the barrier.
 
-It is **not** a proof that the regions remain independent throughout the future
-legal game tree. It does not establish a combinatorial-game sum, calculate a
-chess or CGT value, or prove that the input position is reachable.
+The guarantee ends at the supplied board. Descendant search, combinatorial-game
+sums and values, and position reachability lie outside the contract.
 
 Bitmesh is pre-1.0 research software. No formal package release has been
 published yet. It is licensed [GPL-3.0-or-later](LICENSE), matching its
 direct dependency on [Shakmaty](https://github.com/niklasf/shakmaty)
 (GPL-3.0).
+
+## Clean-clone quick start
+
+Rust 1.88 or newer is required.
+
+```console
+git clone https://github.com/devinnicholson/bitmesh.git
+cd bitmesh
+cargo test --locked
+```
 
 ## Executable FEN example
 
@@ -78,7 +87,7 @@ constructed without a reachability or legality check.
   adjacency.
 
 These are board-graph claims. A strict structural certificate alone says
-nothing about whether a chess move can alter the barrier or connect regions.
+only that the selected barrier separates the recorded occupied material.
 
 ### Conservative one-ply screen
 
@@ -88,20 +97,21 @@ nothing about whether a chess move can alter the barrier or connect regions.
 - every barrier pawn to be blocked forward by another barrier pawn (or be on the
   edge of the board);
 - no barrier pawn to have an immediate geometric capture;
+- the union of certificate active masks to equal the occupied non-barrier
+  squares on the supplied board;
 - every occupied non-barrier square to lie in a certified component; and
 - no generated one-ply destination to remove the barrier, enter another
   component, or enter an uncertified free square.
 
 The checker deliberately analyzes both colors and over-approximates selected
-movement. For example, pawn quiet moves do not consult side to move, check, pins,
-or starting-rank rules. This makes false rejections possible. Because the API
-receives only `Board`, it also cannot inspect castling rights, en-passant state,
-half-move counters, repetition history, or whose turn it is.
+movement. Pawn quiet moves, for example, are generated without side-to-move,
+check, pin, or starting-rank information. The `Board` input also omits castling
+rights, en-passant state, half-move counters, repetition history, and turn.
+These choices can produce false rejections.
 
-Most importantly, acceptance does not quantify over descendants. A future move
-within one region might change the barrier or enable later interaction. Treat
-the proof as a deterministic filter for candidate data, not a full game-tree
-theorem.
+Acceptance quantifies over the supplied board. A move within one region can
+change the barrier or enable later interaction, so research pipelines should
+use the proof as a deterministic candidate-data filter.
 
 ## Failure modes
 
@@ -124,7 +134,7 @@ Bitmesh API is called in the example.
 ## Composition and provenance certificates
 
 `DecompositionCertificate` exposes a `BMDCERT` v1 canonical byte payload and a
-SHA-256 structural digest. Component order does not affect that payload.
+SHA-256 structural digest. Component ordering leaves that payload unchanged.
 `position_bound_decomposition_certificate_digest` can additionally bind the
 structural digest to caller-supplied canonical position text and a namespace.
 Callers are responsible for actually canonicalizing that text.
@@ -136,12 +146,17 @@ Callers are responsible for actually canonicalizing that text.
 - a caller-supplied digest for the composed result.
 
 `validate_against_decomposition` checks the structural provenance and exact root
-coverage. It does not verify the component values, recompute their sum, or prove
-the chess/CGT correctness of the result.
+coverage. Component-value verification, sum recomputation, and chess/CGT
+correctness remain the caller's responsibility.
 
-Never use an unbound decomposition digest as the identity of a chess position:
-different boards can have the same structural fields. Use a position-bound
-digest when position identity matters.
+An unbound decomposition digest identifies structural certificate fields.
+Different boards can share those fields. Position-sensitive pipelines should
+use the position-bound digest with a documented canonical text format and
+namespace.
+
+`BMCOMPOSE` v1 and `BMDPOSCERT` v1 store caller text with unsigned 16-bit length
+prefixes. Each value digest, canonical position, and context namespace is
+limited to 65,535 UTF-8 bytes. Oversized fields return typed validation errors.
 
 ## Stability and versioning
 
@@ -151,7 +166,7 @@ version may change Rust APIs. Patch releases should remain API compatible.
 Canonical payload formats have their own explicit magic and version byte. The
 checked-in compatibility tests freeze the current `BMDCERT` v1 and `BMCOMPOSE`
 v1 byte contracts and digest fixtures. A breaking serialization change must use
-a new payload version or magic; it must not silently reinterpret v1. The
+a new payload version or magic; v1 semantics remain fixed. The
 `bitmesh:conservative_legal_independence:v0` proof kind remains experimental and
 must be matched exactly by downstream manifests.
 
@@ -169,7 +184,7 @@ constant bound in practice. Expressed for a generalized `V`-square graph:
 - canonical serialization and hashing are linear in the number of certificate
   components and digest text bytes.
 
-No latency or throughput claim is made without a versioned benchmark.
+The repository currently contains no versioned latency or throughput benchmark.
 
 ## Development
 
@@ -181,7 +196,10 @@ Run the same checks as CI with:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
-cargo rustdoc --lib -- -D missing-docs
+cargo rustdoc --all-features --lib -- -D warnings -D missing-docs
+cargo run --locked --example certify_fen -- \
+  '7k/8/8/p1p1p1p1/PpPpPpPp/1P1P1P1P/8/K7 w - - 0 1'
+cargo package --locked
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for change and compatibility requirements
