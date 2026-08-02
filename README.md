@@ -1,5 +1,7 @@
 # Bitmesh
 
+[![CI](https://github.com/devinnicholson/bitmesh/actions/workflows/ci.yml/badge.svg)](https://github.com/devinnicholson/bitmesh/actions/workflows/ci.yml)
+
 Bitmesh is an experimental Rust library for producing conservative structural
 decomposition certificates from chess bitboards. It uses locked-pawn barriers
 and 8-way board connectivity to identify candidate regions, then optionally
@@ -19,6 +21,26 @@ Bitmesh is pre-1.0 research software. No formal package release has been
 published yet. It is licensed [GPL-3.0-or-later](LICENSE), matching its
 direct dependency on [Shakmaty](https://github.com/niklasf/shakmaty)
 (GPL-3.0).
+
+## Status and role
+
+| Item | Current state |
+| --- | --- |
+| Crate | `bitmesh` 0.1.0 research candidate |
+| Input | A caller-supplied `shakmaty::Board` |
+| Output | Structural, position-bound, and composition-provenance certificates |
+| Minimum Rust | 1.88 |
+| License | GPL-3.0-or-later |
+| Registry release | Pending |
+
+Bitmesh is the optional chess-structure layer in the
+[Partizan](https://github.com/devinnicholson/partizan) stack. It can support
+[Astralbase](https://github.com/devinnicholson/astralbase) domain gates and
+bind caller-supplied component digests into composition provenance.
+[Thermograph](https://github.com/devinnicholson/thermograph) owns finite-game
+values and comparison. Bitmesh never computes a component value or proves a
+disjunctive sum; Partizan must verify those claims independently before
+promoting a result.
 
 ## Clean-clone quick start
 
