@@ -38,7 +38,8 @@ No formal release has been published yet.
 - Added example execution and package assembly to the stable Linux CI job.
 - Limited packaged crate contents to source, examples, metadata, licensing,
   governance, and user-facing release documents.
-- Added optimized tests and a crates.io publication dry run to CI.
+- Added optimized tests, extracted-package tests, and a crates.io publication
+  dry run to CI.
 
 ### Compatibility
 

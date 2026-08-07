@@ -25,6 +25,8 @@ cargo test --locked --release
 cargo rustdoc --all-features --lib -- -D warnings -D missing-docs
 cargo run --locked --example certify_fen -- \
   '7k/8/8/p1p1p1p1/PpPpPpPp/1P1P1P1P/8/K7 w - - 0 1'
+cargo package --locked
+cargo test --locked --manifest-path target/package/bitmesh-0.1.0/Cargo.toml
 cargo package --locked --list
 cargo publish --locked --dry-run
 ```
