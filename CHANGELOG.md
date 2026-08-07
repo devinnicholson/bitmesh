@@ -20,6 +20,13 @@ No formal release has been published yet.
   length prefixes in `BMCOMPOSE` v1 and `BMDPOSCERT` v1.
 - A board-binding check that requires certificate active masks to match the
   occupied non-barrier squares before a one-ply proof is accepted.
+- Separate modules for board connectivity, certificate operations, public
+  types, validation, canonical serialization, and tests.
+- Deterministic boundary, mutation, stale-binding, and panic-contract tests.
+- Security and support policies, DCO contribution terms, issue forms,
+  dependency update configuration, and a release checklist.
+- Scheduled advisory, license, duplicate-dependency, and dependency-source
+  checks through `cargo-deny`.
 
 ### Changed
 
@@ -29,9 +36,12 @@ No formal release has been published yet.
 - Licensed the crate GPL-3.0-or-later, matching its direct Shakmaty (GPL-3.0)
   dependency.
 - Added example execution and package assembly to the stable Linux CI job.
+- Limited packaged crate contents to source, examples, metadata, licensing,
+  governance, and user-facing release documents.
+- Added optimized tests and a crates.io publication dry run to CI.
 
 ### Compatibility
 
-- Existing `BMDCERT` v1 and `BMCOMPOSE` v1 payloads and digest fixtures are
-  unchanged.
+- Existing `BMDCERT` v1, `BMCOMPOSE` v1, and `BMDPOSCERT` v1 payloads
+  and digest fixtures are unchanged.
 - `bitmesh:conservative_legal_independence:v0` now rejects stale active masks.

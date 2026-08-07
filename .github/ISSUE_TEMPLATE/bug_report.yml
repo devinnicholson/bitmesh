@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a reproducible implementation or documentation defect.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include confidential or security-sensitive material.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0 or full commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Rust version, operating system, and architecture
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: Minimal input
+      description: Provide the smallest board, certificate, or code example that reproduces the defect.
+      render: rust
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: guarantee
+    attributes:
+      label: Affected guarantee or API
+      description: Identify the README section or public API contract involved.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Reproduction command and output
+      render: shell
+    validations:
+      required: true

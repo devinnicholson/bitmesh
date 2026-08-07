@@ -7,10 +7,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     name: Rust ${{ matrix.rust }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -35,10 +40,15 @@ jobs:
           components: rustfmt, clippy
       - name: Check formatting
         run: cargo fmt --check
+      - name: Check all targets
+        run: cargo check --locked --all-targets --all-features
       - name: Lint all targets
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test locked dependencies
         run: cargo test --locked
+      - name: Test optimized build
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: cargo test --locked --release
       - name: Run the documented FEN example
         if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
         run: >-
@@ -49,3 +59,9 @@ jobs:
       - name: Verify package assembly
         if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
         run: cargo package --locked
+      - name: Inspect package contents
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: cargo package --locked --list
+      - name: Verify registry publication without uploading
+        if: matrix.os == 'ubuntu-latest' && matrix.rust == 'stable'
+        run: cargo publish --locked --dry-run

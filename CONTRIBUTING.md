@@ -13,23 +13,39 @@ Before proposing a change:
 4. Update the README and changelog whenever a public guarantee, limitation, API,
    proof kind, or payload changes.
 
+## Developer Certificate of Origin
+
+Contributions use the
+[Developer Certificate of Origin 1.1](DEVELOPER_CERTIFICATE_OF_ORIGIN). Sign
+off every commit:
+
+```console
+git commit --signoff
+```
+
+The sign-off records that you have the right to submit the contribution under
+this repository's license. Keep authorship and third-party provenance in the
+commit history.
+
 Run the complete local gate:
 
 ```console
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
+cargo test --locked --release
 cargo rustdoc --all-features --lib -- -D warnings -D missing-docs
 cargo run --locked --example certify_fen -- \
   '7k/8/8/p1p1p1p1/PpPpPpPp/1P1P1P1P/8/K7 w - - 0 1'
 cargo package --locked
+cargo publish --locked --dry-run
 ```
 
 ## Certificate compatibility
 
-`BMDCERT` v1 and `BMCOMPOSE` v1 are externally consumable byte contracts.
-Classify every proposed golden-payload or digest difference before editing a
-fixture:
+`BMDCERT` v1, `BMCOMPOSE` v1, and `BMDPOSCERT` v1 are externally
+consumable byte contracts. Classify every proposed golden-payload or digest
+difference before editing a fixture:
 
 - An unintended difference is a regression and must be fixed.
 - A compatible extension must leave existing v1 payloads unchanged.

@@ -1,0 +1,45 @@
+name: Certificate compatibility
+description: Propose a change involving a certificate, digest, or proof contract.
+title: "certificate: "
+labels:
+  - compatibility
+body:
+  - type: dropdown
+    id: contract
+    attributes:
+      label: Contract
+      options:
+        - BMDCERT v1
+        - BMCOMPOSE v1
+        - BMDPOSCERT v1
+        - conservative_legal_independence v0
+        - New contract
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: Proposed change
+      description: Describe fields, validation behavior, and the intended claim.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility analysis
+      description: State whether existing bytes, digests, proof kinds, or callers change.
+    validations:
+      required: true
+  - type: textarea
+    id: controls
+    attributes:
+      label: Positive, negative, and adversarial controls
+    validations:
+      required: true
+  - type: textarea
+    id: migration
+    attributes:
+      label: Versioning and migration
+      description: Explain the new magic/version and migration path if the change is incompatible.
+    validations:
+      required: true

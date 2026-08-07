@@ -33,6 +33,16 @@ direct dependency on [Shakmaty](https://github.com/niklasf/shakmaty)
 | License | GPL-3.0-or-later |
 | Registry release | Pending |
 
+## Start here
+
+| Goal | Entry point |
+| --- | --- |
+| Verify the repository | Run the [five-minute source check](#five-minute-source-check) |
+| Evaluate one position | Run the [FEN example](#executable-fen-example) |
+| Integrate the API | Follow the [library example](#library-api) |
+| Audit a certificate | Read [what each layer guarantees](#what-each-layer-guarantees) and [failure modes](#failure-modes) |
+| Prepare a release | Follow the [release checklist](docs/RELEASE_CHECKLIST.md) |
+
 Bitmesh is the optional chess-structure layer in the
 [Partizan](https://github.com/devinnicholson/partizan) stack. It can support
 [Astralbase](https://github.com/devinnicholson/astralbase) domain gates and
@@ -42,7 +52,7 @@ values and comparison. Bitmesh never computes a component value or proves a
 disjunctive sum; Partizan must verify those claims independently before
 promoting a result.
 
-## Clean-clone quick start
+## Five-minute source check
 
 Rust 1.88 or newer is required.
 
@@ -51,6 +61,9 @@ git clone https://github.com/devinnicholson/bitmesh.git
 cd bitmesh
 cargo test --locked
 ```
+
+The crate has no registry release yet. Pin integrations to an audited commit
+until a release appears on crates.io.
 
 ## Executable FEN example
 
@@ -66,6 +79,8 @@ This hand-checkable position contains a zig-zag wall of mutually blocked pawns
 from the a-file to the h-file. The kings occupy different structural regions.
 The command reports two components and an accepted
 `bitmesh:conservative_legal_independence:v0` proof.
+
+## Library API
 
 Library users can run the same operation directly:
 
@@ -186,9 +201,10 @@ Bitmesh follows Semantic Versioning at the crate API level. Before 1.0, a minor
 version may change Rust APIs. Patch releases should remain API compatible.
 
 Canonical payload formats have their own explicit magic and version byte. The
-checked-in compatibility tests freeze the current `BMDCERT` v1 and `BMCOMPOSE`
-v1 byte contracts and digest fixtures. A breaking serialization change must use
-a new payload version or magic; v1 semantics remain fixed. The
+checked-in compatibility tests freeze the current `BMDCERT` v1,
+`BMCOMPOSE` v1, and `BMDPOSCERT` v1 byte contracts and digest fixtures. A
+breaking serialization change must use a new payload version or magic; v1
+semantics remain fixed. The
 `bitmesh:conservative_legal_independence:v0` proof kind remains experimental and
 must be matched exactly by downstream manifests.
 
@@ -218,12 +234,15 @@ Run the same checks as CI with:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --locked
+cargo test --locked --release
 cargo rustdoc --all-features --lib -- -D warnings -D missing-docs
 cargo run --locked --example certify_fen -- \
   '7k/8/8/p1p1p1p1/PpPpPpPp/1P1P1P1P/8/K7 w - - 0 1'
 cargo package --locked
+cargo publish --locked --dry-run
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for change and compatibility requirements
-and [CHANGELOG.md](CHANGELOG.md) for user-visible changes. Cite the software using
-[CITATION.cff](CITATION.cff).
+and [CHANGELOG.md](CHANGELOG.md) for user-visible changes. Security reports
+follow [SECURITY.md](SECURITY.md); usage support follows
+[SUPPORT.md](SUPPORT.md). Cite the software using [CITATION.cff](CITATION.cff).

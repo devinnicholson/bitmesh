@@ -12,6 +12,22 @@ documentation = "https://docs.rs/bitmesh"
 readme = "README.md"
 keywords = ["chess", "bitboard", "graph", "cgt", "research"]
 categories = ["algorithms", "game-development", "mathematics"]
+include = [
+    "src/**",
+    "examples/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "DEVELOPER_CERTIFICATE_OF_ORIGIN",
+    "LICENSE",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "CITATION.cff",
+    "deny.toml",
+    "docs/RELEASE_CHECKLIST.md",
+]
 
 [dependencies]
 shakmaty = "0.27"
