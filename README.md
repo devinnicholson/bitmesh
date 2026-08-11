@@ -32,6 +32,7 @@ direct dependency on [Shakmaty](https://github.com/niklasf/shakmaty)
 | Minimum Rust | 1.88 |
 | License | GPL-3.0-or-later |
 | Registry release | Pending |
+| Research snapshot | [`v0.1.0-alpha.1`](https://github.com/devinnicholson/bitmesh/releases/tag/v0.1.0-alpha.1) |
 
 ## Start here
 
